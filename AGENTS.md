@@ -24,16 +24,42 @@ separate repository).
   it.
   - `config.py`: `require_env(name)` for settings.
   - `db.py`: `create_supabase(source=None)`, the only way to create a Supabase
-    client (see "Revision sources").
+    client (see "Revision sources"); `fetch_all(client, table, columns, where)`
+    for every paged read; `PUBLISHED_FILTER` (Keebdex's published rule); `Row`.
+  - `pool.py`: `run_each(items, work)`, network work a few at a time
+    (`CONCURRENCY`), counting failures.
   - `http.py`: `create_http_client()` for reading websites.
   - `report.py`: `configure_logging()` and `write_summary(markdown)` (GitHub
     Actions job summary).
+  - `slug.py`: `url_slugify`, python-slugify with Keebdex's punctuation rules,
+    plus `LEGACY_SLUGS`, the slugs catalog-sync gave names python-slugify slugs
+    differently (`docs/slugs.md`).
+  - `ids.py`: `crc32_hex`, the colorway ids catalog-sync made with npm `crc`.
+  - `cf_images.py`: Cloudflare Images (`list_images`, `upload_image` and
+    `upload_file`, with catalog-sync's fallbacks: download and send as a file
+    what Cloudflare cannot fetch, downscale what is too large, refuse deleted
+    imgur images; `download_original`, `delete_image`). Only `pelican prune`
+    deletes images.
+  - `r2.py`: `Bucket`, the R2 backup bucket over its S3 API (boto3), and its
+    lock rules through the Cloudflare API.
 - `src/aviary/lorikeet/`: reference color palettes. `ral.py` crawls
   ralcolorchart.com, `sync.py` plans and writes the `colors` rows, `__main__.py`
   is the `lorikeet` command.
+- `src/aviary/bowerbird/`: the artisan sync, ported from `../catalog-sync`.
+  `gdoc/` holds the Google Docs side (`parser.py`, `dates.py`, `jsregex.py`,
+  `google.py` for the read-only API calls, `importer.py`); `jsregex.py` also
+  holds JavaScript's whitespace (`JS_WHITESPACE`, `js_trim`), and per-maker name
+  markers are data in `parser.MAKER_MARKERS`, not branches. `makers/` holds one
+  scraper per maker (`SCRAPERS`, `PARTIAL_MAKERS`), `plan.py` the pure port of
+  catalog-sync's `updateMakerDatabase`, `apply.py` the reads and writes,
+  `images.py` the colorway image ids and uploads, `__main__.py` the `bowerbird`
+  command. See "Artisan sync".
+- `src/aviary/pelican/`: Cloudflare images and their R2 backups, ported from
+  catalog-sync's image jobs. `references.py` (`IMAGE_COLUMNS`, which images the
+  database references), `sync.py`, `maintenance.py` (restore, prune, backup),
+  `__main__.py` the `pelican` command. See "Images and backups".
 - Planned, not yet here: `magpie` (forum crawler writing to the `ingest` schema
-  for staff review) and `bowerbird` (the artisan sync ported from
-  `../catalog-sync`). Create a module only when its first real code lands.
+  for staff review). Create a module only when its first real code lands.
 
 ## Commands
 
@@ -41,9 +67,12 @@ separate repository).
   Conventional Commits check on commit messages).
 - `uv run ruff check .` and `uv run ruff format .`: lint and format. CI runs
   both (`.github/workflows/ci.yml`).
+- `uv run pytest`: tests (CI runs them too). Do not claim tests passed unless
+  they were actually run.
 - `uv run --env-file .env lorikeet ral [--dry-run | --csv PATH]`.
-- There is no test suite yet. Do not claim tests passed unless a relevant check
-  was actually run.
+- `uv run --env-file .env bowerbird gdoc|scrape [--maker ID] [--dry-run]`.
+- `uv run --env-file .env pelican sync|restore|prune|backup [--dry-run]`
+  (`restore --force`, `backup --limit N --force-trash`).
 
 ## Rules for jobs
 
@@ -59,8 +88,10 @@ separate repository).
   per request.
 - Keep requests to other websites polite: one at a time, with a delay between
   pages.
-- Scheduled workflows run without `--dry-run`; manual runs (`workflow_dispatch`)
-  default to a dry run.
+- Manual runs (`workflow_dispatch`) default to a dry run. Scheduled runs write,
+  except bowerbird's and pelican's: while catalog-sync still runs their jobs,
+  they run as dry runs only, ahead of catalog-sync, to compare against it. When
+  a job moves over, drop its schedule check and move it to catalog-sync's time.
 
 ## Revision sources
 
@@ -75,18 +106,181 @@ per process). `create_supabase(source)` sends them when `source` is given.
   `record_revisions_source_check` constraint (a migration in
   `../keebdex/supabase`).
 - `lorikeet` writes only `colors`, which has no revisions, and sends no source.
+- `bowerbird gdoc` sends `gdoc` and `bowerbird scrape` sends `scraper`, the
+  sources catalog-sync used, so Keebdex shows their changes the same way.
+
+## Artisan sync
+
+`bowerbird` is the artisan sync that used to live in catalog-sync
+(`gdocs-importer.js`, `maker-scraper.js`, `artisans/utils/database.js`,
+`parser.js`). Its output was checked against the JavaScript on real data: the
+parser on every maker's doc, the scrapers on the live sites, and the sync on
+1,000 random scenarios. These rules came with it.
+
+### Input
+
+Every source (each maker scraper, the Google Docs parser) produces the same
+input: sculpt dicts shaped like `artisan_sculpts` rows, each with a `colorways`
+list shaped like `artisan_colorways` rows, and `remote_img` (the source image)
+on colorways. An absent key means "not provided" and never syncs; a key set to
+None clears the stored value. Keep that distinction when porting or writing a
+source: it is JavaScript's `undefined` versus `null`.
+
+### Ownership
+
+- Sculpts and colorways have a `source` column: `gdoc` (`bowerbird gdoc`),
+  `scraper` (`bowerbird scrape`), `keebdex` (added in the app). A sync only
+  reads, matches, updates, or removes rows of its own source, so the doc sync
+  and the website sync of one maker never delete each other's rows.
+- Updates patch only `SYNCABLE_FIELDS` / `SCULPT_SYNCABLE_FIELDS`, skipping
+  fields in the row's `overridden_fields` (locked in the app).
+  `ALWAYS_SYNCED_FIELDS` / `SCULPT_ALWAYS_SYNCED_FIELDS` (`order`,
+  `source_document_id`) are metadata the app cannot edit, so they sync
+  regardless; only add a field there if the app can't edit it. Lists (`stem`)
+  compare by sorted content, and a missing list equals an empty one.
+- Synced rows are trusted maker data: inserted with `review_status` null
+  (published), never touching moderation columns, and with `submitted_by` null
+  (Keebdex sends no notifications about them).
+
+### Matching and removal
+
+1. A colorway matches a stored row by `colorway_id` first.
+2. Otherwise by name, but only against orphaned stored rows (whose `colorway_id`
+   matches no incoming row), each claimable once, from per-name queues:
+   duplicate or empty names must not collapse into one candidate. A name match
+   also syncs the new `colorway_id` (unless `img` is locked).
+3. Stored colorways nothing claimed are deleted, or marked `deleted` while a
+   user collection holds them.
+4. A stored sculpt nothing matched (gone from the source, or renamed there) is
+   removed after its colorways: deleted when no colorway of any source points at
+   it, marked `deleted` when only deleted ones do, and kept while colorways of
+   other sources do. Never delete colorways by `maker_sculpt_id`.
+5. A sculpt renamed in Keebdex keeps its source slug in `source_slug`, and
+   incoming rows are pointed at the renamed slug.
+
+### Partial syncs
+
+- A maker can have several docs (`document_ids`), and one sculpt can span them:
+  `merge_documents` (catalog-sync's `deepmerge` with `customMerge`) takes the
+  later doc's fields and appends its colorways with their `order` shifted past
+  the earlier ones (+ length + 1).
+- Docs download one by one. A 404 skips that doc and makes the sync partial;
+  every doc gone (or a 404 anywhere else in the maker) disables the maker's sync
+  and marks it deleted. Any other error fails the maker.
+- Every parsed row carries `source_document_id`. With `preserve_missing`, a
+  stored row absent from the input is kept unless its `source_document_id` is
+  one of the docs that loaded (`available_document_ids`); a null one is kept.
+- In a partial sync existing colorways keep their stored `order`; new ones get
+  the sculpt's stored count plus their index in the input.
+- `PARTIAL_MAKERS` (keycat) are always partial: their sources hold only part of
+  their catalog. The keycat scraper stops at Pink Camo, where its doc takes
+  over.
+
+### Ids, images, and failures
+
+- Colorway ids, image ids, and sculpt slugs must stay what catalog-sync made
+  (`url_slugify`, `crc32_hex`, `images.image_id`, the doc's image object ids),
+  or rows would be replaced. `url_slugify` is python-slugify, so for names
+  catalog-sync slugged differently `LEGACY_SLUGS` keeps the old slug
+  (`docs/slugs.md`); new names follow python-slugify. Recheck the map against
+  the database before bowerbird takes over.
+- The parser is a line-by-line port, quirks included (a regex's left-over
+  `lastIndex`, first-match-only replaces). Check a parser change against the
+  previous output on real docs. Release dates are the exception: `dates.py`
+  converts only "January 2023" / "Jan 2023" and "2023/5/17" with `strptime` and
+  keeps anything else as written (with a warning, once per value and run), where
+  catalog-sync's date-fns also took a one-letter month or a 1 to 3 digit year.
+  Misspelled months found in docs go in `MONTH_TYPOS` ("Sept", "Augus") and
+  words between month and year in `RELEASE_NOISE` ("Exclusive"); catalog-sync
+  kept those values as written, so adding one rewrites them on the next sync.
+- A colorway's `img` is its Cloudflare URL (`artisan/<maker>/<sculpt>/<id>`),
+  set before upload; the image keeps that path after a sculpt rename. Images are
+  never deleted here (`pelican prune` removes unused ones), and a failed upload
+  is logged and retried on the next run.
+- A maker that fails is logged and skipped, and the run still exits 0: a deleted
+  or broken doc is routine and must not stop the other makers or the next
+  workflow step. Failed makers are listed at the end of the log and in the job
+  summary. A source that returns nothing changes nothing.
+- When colorways were added or changed, the maker's `contributors` and
+  `updated_at` are refreshed from the last doc's Drive revisions.
+
+### Known caveats
+
+- Rows are scoped by `source`, so a colorway added in the app and the same
+  colorway later appearing in a doc are never reconciled: the doc's copy is
+  inserted as a new row (rare duplicates).
+- In a partial sync the index used for a new colorway's `order` is global across
+  all incoming colorways, not per sculpt. Gaps are harmless: only the relative
+  order matters.
+
+## Images and backups
+
+Image columns: `artisan_colorways.img`, `keysets.img` / `order_graph` /
+`order_history`, `keyset_kits.img`, `keyboard_variants.img_front` / `img_back`.
+A Cloudflare image is stored as `<delivery base>/<id>/public` (ids may contain
+slashes); anything else is an external URL, which Keebdex shows as it is.
+`cf_images.delivery_url` builds that URL and `cf_images.to_image_id` reads it
+back. `pelican/references.py` lists the columns in `IMAGE_COLUMNS`, which `sync`
+uploads into too (a test checks it): add a column there whenever a table starts
+storing Cloudflare images, or `prune` deletes its images.
+
+- `pelican sync` (`image-sync` revision source) uploads external images of
+  published rows (the row and its keyset, keyboard, or sculpt null or Approved)
+  under readable ids ending in a CRC32 of the source URL:
+  `keyset/<profile_keyset_id>/<hash>` (cover), `.../order-graph/<hash>`,
+  `.../order-history/<hash>`, `keyset/<pk>/kit/<id>/<kit_id or slug>/<hash>`,
+  `keyboard/<brand_keyboard_slug>/<release_id>/<variant slug>/<side>/<hash>`,
+  `artisan/<maker>/<sculpt>/<colorway_id>/<hash>` (colorways added in the app;
+  bowerbird uploads its own). The hash gives a replaced image a new id:
+  Cloudflare rejects an existing id, and an id must never change content or the
+  R2 backup keeps the old file. Rows in review keep their original URL. A source
+  answering 404 (or a deleted imgur image) clears the row's image (kits to
+  `''`), except on keyboard variants.
+- `pelican prune` deletes Cloudflare images no row references, counting rows of
+  every review status and image URLs in the `changes` of Pending
+  `edit_suggestions`, and skips images uploaded in the last 7 days (an app
+  upload isn't referenced until its form is saved). Every read must succeed and
+  at least one image must be referenced, or it deletes nothing.
+- `pelican restore` re-uploads, from R2 (`images/<id>`) and under the same id,
+  referenced images Cloudflare no longer has: a record pointing at a pruned
+  image again after an Undo, a Restore, or an approved suggestion. It refuses
+  when Cloudflare lists nothing or more than 10% of referenced images are
+  missing (a bad listing), unless `--force`. Keebdex's revision history relies
+  on this instead of keeping pruned images.
+- `pelican backup` copies every Cloudflare image not yet in R2 to `images/<id>`
+  through the API (`/blob`, with `CF_IMAGES_READ_TOKEN` when set: account tokens
+  get a 403 on the app's UUID-named uploads), then moves backups of images gone
+  from Cloudflare to `trash/images/<id>` once no enabled bucket lock rule
+  covering the key retains them (`Age`, `Date`; any other condition, or a rule
+  with a null prefix, retains). Rules that can't be read count as a lock on
+  everything. It refuses to trash more than 10% of the backups in one run
+  (`--force-trash` lifts it) or anything when Cloudflare lists nothing. A move
+  is copy then delete, so a failure leaves the backup in both places, never in
+  neither.
+- The workflow's `database` job dumps the database (`pg_dump`, custom format) to
+  `db/daily/<date>.dump`, and on the 1st also `db/monthly/<yyyy-mm>.dump`.
+- Retention and protection are set on the bucket, not in code: a lifecycle rule
+  expires `db/daily/` after 30 days, and `images/` is locked indefinitely (so
+  nothing moves to the trash today). Decide how long Keebdex keeps revisions
+  together with any finite lock on `images/`: an image pruned and trashed past
+  it can no longer be restored.
+- `docs/backups.md` walks an operator through the trash (turning it on is
+  infrastructure only) and manual restores; keep it in step with `backup`.
+- Unlike bowerbird, these jobs exit 1 when something failed or looked wrong; a
+  failed prune deletion only logs.
 
 ## Code style
 
 - Python 3.13, typed, formatted and linted by ruff (`pyproject.toml`). Use
   `logging` (module-level `log = logging.getLogger(__name__)`), never `print`.
 - Keep crawling (fetch and parse) apart from syncing (compare and write), so a
-  crawl can run without a database (`--csv`).
+  crawl can run without a database (`--csv`) and the sync logic can be tested
+  without one (`bowerbird/plan.py`, `tests/test_plan.py`).
 
 ## Git
 
 Commit messages follow
 [Conventional Commits](https://www.conventionalcommits.org/):
 `<type>(<scope>): <summary>`, imperative and lowercase, no trailing period. The
-scope is the module or area (`lorikeet`, `common`, `ci`). Do not create commits,
-branches, or pull requests unless asked.
+scope is the module or area (`lorikeet`, `bowerbird`, `pelican`, `common`,
+`ci`). Do not create commits, branches, or pull requests unless asked.

@@ -252,3 +252,6 @@ $RECYCLE.BIN/
 
 # Local Claude Code overrides
 CLAUDE.local.md
+
+# Google service account key (its JSON goes in GOOGLE_SERVICE_ACCOUNT)
+keebdex.json

@@ -1,7 +1,9 @@
-"""The Supabase client every job uses."""
+"""The Supabase client every job uses, and paged reads."""
 
 import os
 import uuid
+from collections.abc import Callable
+from typing import Any
 
 from supabase import Client, ClientOptions, create_client
 
@@ -10,6 +12,15 @@ from aviary.common.config import require_env
 # One id per process (the GitHub Actions run when there is one), so Keebdex
 # groups a run's revisions into one entry.
 RUN_ID = os.environ.get("GITHUB_RUN_ID") or str(uuid.uuid4())
+
+# A database row as supabase-py returns it.
+Row = dict[str, Any]
+
+# PostgREST returns at most this many rows per request.
+PAGE_SIZE = 1000
+
+# Keebdex's PUBLISHED_FILTER: added by staff (null) or approved.
+PUBLISHED_FILTER = "review_status.is.null,review_status.eq.Approved"
 
 
 def create_supabase(source: str | None = None) -> Client:
@@ -29,3 +40,20 @@ def create_supabase(source: str | None = None) -> Client:
             headers=headers, auto_refresh_token=False, persist_session=False
         ),
     )
+
+
+def fetch_all(
+    client: Client,
+    table: str,
+    columns: str = "*",
+    where: Callable = lambda query: query,
+) -> list[Row]:
+    """Every row matching `where`, in pages ordered by id. Raises on any error
+    (supabase-py does): a partial read must never look like "nothing there"."""
+    rows: list[Row] = []
+    while True:
+        query = where(client.table(table).select(columns)).order("id")
+        data = query.range(len(rows), len(rows) + PAGE_SIZE - 1).execute().data
+        rows += data
+        if len(data) < PAGE_SIZE:
+            return rows
