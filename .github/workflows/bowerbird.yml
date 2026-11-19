@@ -3,12 +3,18 @@ name: bowerbird
 on:
   workflow_dispatch:
     inputs:
+      sources:
+        description: Which catalogs to sync
+        type: choice
+        options: [all, gdoc, scrape]
+        default: all
       dry-run:
         description: Log every write and upload without making it
         type: boolean
         default: true
-  # No schedule yet: catalog-sync's artisan-sync still runs the maker scraper.
-  # Add one here only after removing it there, so the two never both write.
+  # No schedule yet: catalog-sync's artisan-sync still syncs the same rows.
+  # Add one here (daily, as catalog-sync ran at 23:00 UTC) only once that
+  # workflow is gone, so the two never both write.
 
 concurrency:
   group: bowerbird
@@ -20,11 +26,13 @@ env:
   CF_IMAGES_ACCOUNT_ID: ${{ secrets.CF_IMAGES_ACCOUNT_ID }}
   CF_IMAGES_API_KEY: ${{ secrets.CF_IMAGES_API_KEY }}
   CF_IMAGES_ACCOUNT_HASH: ${{ secrets.CF_IMAGES_ACCOUNT_HASH }}
+  GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+  DRY_RUN: ${{ inputs.dry-run && '--dry-run' || '' }}
 
 jobs:
-  scrape:
+  sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -35,5 +43,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --no-dev
 
+      # A maker that fails is logged and skipped; the command still exits 0,
+      # so one broken doc never stops the next step.
+      - name: Sync makers' Google Docs
+        if: inputs.sources != 'scrape'
+        run: uv run bowerbird gdoc $DRY_RUN
+
       - name: Sync maker websites
-        run: uv run bowerbird scrape ${{ inputs.dry-run && '--dry-run' || '' }}
+        if: inputs.sources != 'gdoc'
+        run: uv run bowerbird scrape $DRY_RUN

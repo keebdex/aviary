@@ -43,8 +43,9 @@ separate repository).
 - `src/aviary/lorikeet/`: reference color palettes. `ral.py` crawls
   ralcolorchart.com, `sync.py` plans and writes the `colors` rows, `__main__.py`
   is the `lorikeet` command.
-- `src/aviary/bowerbird/`: the artisan sync, ported from `../catalog-sync`
-  (maker websites so far; the Google Docs importer is next). `makers/` holds one
+- `src/aviary/bowerbird/`: the artisan sync, ported from `../catalog-sync`.
+  `gdoc/` holds the Google Docs side (`parser.py`, `dates.py`, `jsregex.py`,
+  `google.py` for the read-only API calls, `importer.py`). `makers/` holds one
   scraper per maker (`SCRAPERS`, `PARTIAL_MAKERS`), `plan.py` the pure port of
   catalog-sync's `updateMakerDatabase`, `apply.py` the reads and writes,
   `images.py` the colorway image ids and uploads, `__main__.py` the `bowerbird`
@@ -61,7 +62,7 @@ separate repository).
 - `uv run pytest`: tests (CI runs them too). Do not claim tests passed unless
   they were actually run.
 - `uv run --env-file .env lorikeet ral [--dry-run | --csv PATH]`.
-- `uv run --env-file .env bowerbird scrape [--maker ID] [--dry-run]`.
+- `uv run --env-file .env bowerbird gdoc|scrape [--maker ID] [--dry-run]`.
 
 ## Rules for jobs
 
@@ -93,38 +94,107 @@ per process). `create_supabase(source)` sends them when `source` is given.
   `record_revisions_source_check` constraint (a migration in
   `../keebdex/supabase`).
 - `lorikeet` writes only `colors`, which has no revisions, and sends no source.
-- `bowerbird scrape` sends `scraper`, the source catalog-sync's maker scraper
-  used, so Keebdex shows both the same way.
+- `bowerbird gdoc` sends `gdoc` and `bowerbird scrape` sends `scraper`, the
+  sources catalog-sync used, so Keebdex shows their changes the same way.
 
 ## Artisan sync
 
-`bowerbird` must behave exactly like catalog-sync's artisan sync while both
-exist, since they write the same rows. catalog-sync's `AGENTS.md` ("Artisan data
-ownership", "Colorway matching rules", "Removed sculpts", "Partial syncs",
-"Failures") explains the rules; `plan.py` follows them line by line.
+`bowerbird` is the artisan sync that used to live in catalog-sync
+(`gdocs-importer.js`, `maker-scraper.js`, `artisans/utils/database.js`,
+`parser.js`). Its output was checked against the JavaScript on real data: the
+parser on every maker's doc, the scrapers on the live sites, and the sync on
+1,000 random scenarios. These rules came with it.
 
-- Every source (each maker scraper, later the Google Docs importer) produces the
-  same input: sculpt dicts shaped like `artisan_sculpts` rows, each with a
-  `colorways` list shaped like `artisan_colorways` rows. An absent key means
-  "not provided" and never syncs; a key set to None clears the stored value.
-  Keep that distinction when porting a source: it is JavaScript's `undefined`
-  versus `null`.
-- Only rows of the sync's own `source` are read, matched, or removed. Only the
-  fields in `SYNCABLE_FIELDS` / `SCULPT_SYNCABLE_FIELDS` sync, skipping those in
-  the row's `overridden_fields`; `ALWAYS_SYNCED_FIELDS` sync regardless.
-- Removed colorways are deleted, or marked `deleted` while a user collection
-  holds them. A removed sculpt is deleted only when no colorway of any source
-  points at it, marked `deleted` when only deleted ones do, and kept while
-  colorways of other sources do.
-- Colorway ids, image ids, and sculpt slugs must stay what catalog-sync makes
-  (`crc32_hex`, `url_slugify`, `images.image_id`), or every row would be
-  replaced. A scraper port is checked by comparing its output with the
-  JavaScript scraper's on the live site.
-- Images are never deleted here (catalog-sync's `prune-images` does it), and a
-  failed upload is logged, not fatal: its id is still missing, so the next run
-  retries it.
-- A maker that fails (scrape or database error) is logged and skipped, and the
-  run exits non-zero. A scraper that returns nothing changes nothing.
+### Input
+
+Every source (each maker scraper, the Google Docs parser) produces the same
+input: sculpt dicts shaped like `artisan_sculpts` rows, each with a `colorways`
+list shaped like `artisan_colorways` rows, and `remote_img` (the source image)
+on colorways. An absent key means "not provided" and never syncs; a key set to
+None clears the stored value. Keep that distinction when porting or writing a
+source: it is JavaScript's `undefined` versus `null`.
+
+### Ownership
+
+- Sculpts and colorways have a `source` column: `gdoc` (`bowerbird gdoc`),
+  `scraper` (`bowerbird scrape`), `keebdex` (added in the app). A sync only
+  reads, matches, updates, or removes rows of its own source, so the doc sync
+  and the website sync of one maker never delete each other's rows.
+- Updates patch only `SYNCABLE_FIELDS` / `SCULPT_SYNCABLE_FIELDS`, skipping
+  fields in the row's `overridden_fields` (locked in the app).
+  `ALWAYS_SYNCED_FIELDS` / `SCULPT_ALWAYS_SYNCED_FIELDS` (`order`,
+  `source_document_id`) are metadata the app cannot edit, so they sync
+  regardless; only add a field there if the app can't edit it. Lists (`stem`)
+  compare by sorted content, and a missing list equals an empty one.
+- Synced rows are trusted maker data: inserted with `review_status` null
+  (published), never touching moderation columns, and with `submitted_by` null
+  (Keebdex sends no notifications about them).
+
+### Matching and removal
+
+1. A colorway matches a stored row by `colorway_id` first.
+2. Otherwise by name, but only against orphaned stored rows (whose `colorway_id`
+   matches no incoming row), each claimable once, from per-name queues:
+   duplicate or empty names must not collapse into one candidate. A name match
+   also syncs the new `colorway_id` (unless `img` is locked).
+3. Stored colorways nothing claimed are deleted, or marked `deleted` while a
+   user collection holds them.
+4. A stored sculpt nothing matched (gone from the source, or renamed there) is
+   removed after its colorways: deleted when no colorway of any source points at
+   it, marked `deleted` when only deleted ones do, and kept while colorways of
+   other sources do. Never delete colorways by `maker_sculpt_id`.
+5. A sculpt renamed in Keebdex keeps its source slug in `source_slug`, and
+   incoming rows are pointed at the renamed slug.
+
+### Partial syncs
+
+- A maker can have several docs (`document_ids`), and one sculpt can span them:
+  `merge_documents` (catalog-sync's `deepmerge` with `customMerge`) takes the
+  later doc's fields and appends its colorways with their `order` shifted past
+  the earlier ones (+ length + 1).
+- Docs download one by one. A 404 skips that doc and makes the sync partial;
+  every doc gone (or a 404 anywhere else in the maker) disables the maker's sync
+  and marks it deleted. Any other error fails the maker.
+- Every parsed row carries `source_document_id`. With `preserve_missing`, a
+  stored row absent from the input is kept unless its `source_document_id` is
+  one of the docs that loaded (`available_document_ids`); a null one is kept.
+- In a partial sync existing colorways keep their stored `order`; new ones get
+  the sculpt's stored count plus their index in the input.
+- `PARTIAL_MAKERS` (keycat) are always partial: their sources hold only part of
+  their catalog. The keycat scraper stops at Pink Camo, where its doc takes
+  over.
+
+### Ids, images, and failures
+
+- Colorway ids, image ids, and sculpt slugs must stay what catalog-sync made
+  (`url_slugify`, `crc32_hex`, `images.image_id`, the doc's image object ids),
+  or rows would be replaced; `docs/slug-migration.md` lists what a slug library
+  would change.
+- The parser is a line-by-line port, quirks included (a regex's left-over
+  `lastIndex`, first-match-only replaces). Check a parser change against the
+  previous output on real docs. Release dates are the exception: `dates.py`
+  converts only "January 2023" / "Jan 2023" and "2023/5/17" with `strptime` and
+  keeps anything else as written (with a warning), where catalog-sync's date-fns
+  also took a one-letter month or a 1 to 3 digit year.
+- A colorway's `img` is its Cloudflare URL (`artisan/<maker>/<sculpt>/<id>`),
+  set before upload; the image keeps that path after a sculpt rename. Images are
+  never deleted here (catalog-sync's `prune-images` removes unused ones), and a
+  failed upload is logged and retried on the next run.
+- A maker that fails is logged and skipped, and the run still exits 0: a deleted
+  or broken doc is routine and must not stop the other makers or the next
+  workflow step. Failed makers are listed at the end of the log and in the job
+  summary. A source that returns nothing changes nothing.
+- When colorways were added or changed, the maker's `contributors` and
+  `updated_at` are refreshed from the last doc's Drive revisions.
+
+### Known caveats
+
+- Rows are scoped by `source`, so a colorway added in the app and the same
+  colorway later appearing in a doc are never reconciled: the doc's copy is
+  inserted as a new row (rare duplicates).
+- In a partial sync the index used for a new colorway's `order` is global across
+  all incoming colorways, not per sculpt. Gaps are harmless: only the relative
+  order matters.
 
 ## Code style
 

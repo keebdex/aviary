@@ -69,25 +69,36 @@ Design code up on ralcolorchart.com as it is typed.
 
 ## bowerbird
 
-Syncs artisan sculpts and colorways from maker websites into Keebdex (Google
-Docs to follow). It is a port of catalog-sync's maker scraper, which still runs
-in production: run bowerbird only as a dry run until catalog-sync stops.
+Syncs artisan sculpts and colorways into Keebdex from makers' Google Docs and
+maker websites. It is a port of catalog-sync's artisan sync, which still runs in
+production: run bowerbird only as a dry run until catalog-sync's `artisan-sync`
+workflow stops.
+
+```bash
+uv run --env-file .env bowerbird gdoc --dry-run
+```
 
 ```bash
 uv run --env-file .env bowerbird scrape --dry-run
 ```
 
-- `--maker ID` limits the run to one maker (repeatable): `alpha-keycaps`,
-  `keycat`.
-- It owns the rows whose `source` is `scraper` and never touches the others.
-  Synced fields are patched unless locked in Keebdex (`overridden_fields`);
-  colorways gone from the website are deleted, or marked deleted while a user
-  collection holds them; a sculpt gone from the website is deleted only when
-  nothing points at it any more.
+- `gdoc` syncs every published maker with `document_ids`; `scrape` syncs the
+  maker websites (`alpha-keycaps`, `keycat`). `--maker ID` limits a run to one
+  maker (repeatable).
+- Each owns its rows (`source` `gdoc` or `scraper`) and never touches the
+  others. Synced fields are patched unless locked in Keebdex
+  (`overridden_fields`); colorways gone from the source are deleted, or marked
+  deleted while a user collection holds them; a sculpt gone from the source is
+  deleted only when nothing points at it any more.
+- A deleted doc makes the sync partial (rows from it are kept); a maker whose
+  docs are all gone has its sync disabled. A maker that fails is logged and
+  skipped, and the run still succeeds.
 - Colorway images are uploaded to Cloudflare Images under fixed ids. Nothing
   here deletes an image: catalog-sync's `prune-images` removes the unused ones.
-- `.github/workflows/bowerbird.yml` runs it from the Actions tab, as a dry run
-  unless the box is unticked. It has no schedule yet.
+- `.github/workflows/bowerbird.yml` runs either or both from the Actions tab, as
+  a dry run unless the box is unticked. It has no schedule yet.
+- `docs/slug-migration.md` lists the slugs a slug library would change, to
+  migrate before ever replacing `common/slug.py`.
 
 ## License
 
