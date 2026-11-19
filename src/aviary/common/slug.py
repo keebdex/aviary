@@ -1,70 +1,74 @@
-"""URL slugs that match Keebdex's and catalog-sync's exactly.
+"""URL slugs for synced records.
 
-Keebdex builds page keys from slugs (sculpt_id, keyset and keyboard slugs), and
-the same name must give the same slug whichever side builds it, or a synced
-record and an app-made one would get two pages. Both sides use `urlSlugify`
-(strip some punctuation, then npm `slugify` 1.6.9 with `lower: true`); this is a
-line-by-line port of it. `slugify_charmap.json` is that package's character map
-(MIT, https://github.com/simov/slugify), and tests/test_slug.py checks the port
-against values from the JavaScript version. Python slug libraries transliterate
-what npm slugify drops (CJK, the multiplication sign, superscripts), so none
-of them can stand in for it.
+Slugs are python-slugify's, with `&`, `$`, `%`, `<`, `>`, and `|` spelled out
+and underscores kept, after dropping the punctuation Keebdex's `urlSlugify`
+drops (`*+~.()'"!:@,/`), so ordinary names get the same slug in both.
+
+Unusual characters differ: catalog-sync used npm slugify, which drops what is
+missing from its character map (CJK, the multiplication sign) and keeps curly
+quotes as straight ones, where python-slugify transliterates or removes them.
+LEGACY_SLUGS keeps the slugs catalog-sync already gave such names, so their
+sculpts and colorways keep their keys; new names follow this function. Add an
+entry only for a name catalog-sync synced (docs/slugs.md says how to check).
 """
 
-import json
 import re
-import unicodedata
-from functools import cache
-from importlib import resources
 
-# urlSlugify drops these before slugify sees the text.
+from slugify import slugify
+
 _URL_STRIP = re.compile(r"""[*+~.()'"!:@,/]""")
+_REPLACEMENTS = [
+    ["&", "and"],
+    ["$", "dollar"],
+    ["%", "percent"],
+    ["<", "less"],
+    [">", "greater"],
+    ["|", "or"],
+]
+_NOT_ALLOWED = r"[^-a-z0-9_]+"
 
-# JavaScript's \s and String.prototype.trim (no `u` flag), which differ from
-# Python's: they have U+FEFF and lack U+001C to U+001F.
-_JS_SPACES = "".join(
-    chr(code)
-    for code in (
-        *range(0x09, 0x0E),  # tab, line feed, vertical tab, form feed, return
-        0x20,
-        0xA0,
-        0x1680,
-        *range(0x2000, 0x200B),
-        0x2028,
-        0x2029,
-        0x202F,
-        0x205F,
-        0x3000,
-        0xFEFF,
-    )
-)
-_JS_SPACE_CLASS = re.escape(_JS_SPACES)
-
-# slugify's default `remove`: anything but JavaScript's \w (ASCII only),
-# whitespace, and a few symbols.
-_NOT_ALLOWED = re.compile(rf"""[^A-Za-z0-9_{_JS_SPACE_CLASS}$*+~.()'"!\-:@]+""")
-_SPACE_RUNS = re.compile(rf"[{_JS_SPACE_CLASS}]+")
-
-
-@cache
-def _charmap() -> dict[str, str]:
-    data = resources.files("aviary.common").joinpath("slugify_charmap.json")
-    return json.loads(data.read_text(encoding="utf-8"))
-
-
-def slugify(text: str) -> str:
-    """npm slugify(text, { lower: true })."""
-    charmap = _charmap()
-    mapped = []
-    # JavaScript splits by UTF-16 code unit; characters outside the BMP are in
-    # no map and removed below either way, so code points give the same result.
-    for char in unicodedata.normalize("NFC", text):
-        replacement = charmap.get(char, char)
-        mapped.append(" " if replacement == "-" else replacement)
-    slug = _NOT_ALLOWED.sub("", "".join(mapped)).strip(_JS_SPACES)
-    return _SPACE_RUNS.sub("-", slug).lower()
+# name (trimmed) -> slug catalog-sync gave it: 15 sculpts (404artisans,
+# asianjoyco) and alpha-keycaps colorways whose ids hash the slug
+LEGACY_SLUGS = {
+    "#094 \xd7 Christmas": "094-christmas",
+    "Almond Cookie |\u674f\u4ec1\u9905": "almond-cookie-or",
+    "Black Sesame Roll |\u829d\u9ebb\u5377": "black-sesame-roll-or",
+    "BoloBao |\u83e0\u863f\u5305": "bolobao-or",
+    "Char Siu Bao | BBQ Pork Bun | \u53c9\u71d2\u5305": "char-siu-bao-or-bbq-pork-bun-or",  # noqa: E501
+    "DK\u2019s Banana": "dk's-banana",
+    "Dan Tat | Egg Tart | \u86cb\u5854": "dan-tat-or-egg-tart-or",
+    "Dementor\u2019s Kiss": "dementor's-kiss",
+    "Dim Sum Teapot | \u8336\u58f6": "dim-sum-teapot-or",
+    "D\u2019ohnut": "d'ohnut",
+    "D\u2019va": "d'va",
+    "Feng Zhao | Chicken Feet |\u51e4\u722a": "feng-zhao-or-chicken-feet-or",
+    "God\u2019s Nectar": "god's-nectar",
+    "Har Gow | Shrimp Dumpling | \u867e\u997a": "har-gow-or-shrimp-dumpling-or",
+    "Hell\u2019s Pigeon": "hell's-pigeon",
+    "Jiaozi | Chinese Dumpling | \u997a\u5b50": "jiaozi-or-chinese-dumpling-or",
+    "Mantou | Steamed Bun | \u9992\u5934": "mantou-or-steamed-bun-or",
+    "Mooncake | \u6708\u997c": "mooncake-or",
+    "Munkii\u2019s Dream": "munkii's-dream",
+    "Munkii\u2019s Prayer": "munkii's-prayer",
+    "Na\u2019vi": "na'vi",
+    "OG D\u2019Or": "og-d'or",
+    "Raison D\u2019Etre": "raison-d'etre",
+    "Shumai | \u71d2\u8ce3": "shumai-or",
+    "Volker\u2019s Blessing": "volker's-blessing",
+    "XLB | Soup Dumpling | \u5c0f\u7b3c\u5305": "xlb-or-soup-dumpling-or",
+    "Zongzi |\u7cbd\u5b50": "zongzi-or",
+    "\u201cArizona Meetup\u201d": '"arizona-meetup"',
+    "\u201cShe\u2019ll say yes, Amen\u201d": '"she\'ll-say-yes-amen"',
+}
 
 
 def url_slugify(text: str) -> str:
-    """Keebdex's urlSlugify: the slug used in URLs and page keys."""
-    return slugify(_URL_STRIP.sub("", text))
+    """The slug used in URLs, page keys, and colorway ids."""
+    legacy = LEGACY_SLUGS.get(text.strip())
+    if legacy is not None:
+        return legacy
+    return slugify(
+        _URL_STRIP.sub("", text),
+        replacements=_REPLACEMENTS,
+        regex_pattern=_NOT_ALLOWED,
+    )

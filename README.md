@@ -98,8 +98,9 @@ uv run --env-file .env bowerbird scrape --dry-run
   here deletes an image: `pelican prune` removes the unused ones.
 - `.github/workflows/bowerbird.yml` runs either or both from the Actions tab, as
   a dry run unless the box is unticked. It has no schedule yet.
-- `docs/slug-migration.md` lists the slugs a slug library would change, to
-  migrate before ever replacing `common/slug.py`.
+- Slugs come from python-slugify; `docs/slugs.md` explains the map that keeps
+  the slugs catalog-sync gave unusual names, and the check to run before
+  bowerbird takes over.
 
 ## pelican
 
