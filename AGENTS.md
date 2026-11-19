@@ -28,13 +28,9 @@ separate repository).
   - `http.py`: `create_http_client()` for reading websites.
   - `report.py`: `configure_logging()` and `write_summary(markdown)` (GitHub
     Actions job summary).
-  - `slug.py`: `url_slugify`, a port of catalog-sync's and Keebdex's
-    `urlSlugify` (npm `slugify` 1.6.9 and its `slugify_charmap.json`). Page keys
-    are built from slugs, so it must match the JavaScript output exactly:
-    `tests/test_slug.py` checks it against values taken from catalog-sync. No
-    Python library does: npm `slugify` drops every character missing from its
-    charmap (CJK, `×`, `²`) where they transliterate, so `python-slugify` would
-    change 29 of the 3,685 sculpt slugs catalog-sync has made.
+  - `slug.py`: `url_slugify`, python-slugify with Keebdex's punctuation rules,
+    plus `LEGACY_SLUGS`, the slugs catalog-sync gave names python-slugify slugs
+    differently (`docs/slugs.md`).
   - `ids.py`: `crc32_hex`, the colorway ids catalog-sync made with npm `crc`.
   - `cf_images.py`: Cloudflare Images (`list_images`, `upload_image` and
     `upload_file`, with catalog-sync's fallbacks: download and send as a file
@@ -177,14 +173,19 @@ source: it is JavaScript's `undefined` versus `null`.
 
 - Colorway ids, image ids, and sculpt slugs must stay what catalog-sync made
   (`url_slugify`, `crc32_hex`, `images.image_id`, the doc's image object ids),
-  or rows would be replaced; `docs/slug-migration.md` lists what a slug library
-  would change.
+  or rows would be replaced. `url_slugify` is python-slugify, so for names
+  catalog-sync slugged differently `LEGACY_SLUGS` keeps the old slug
+  (`docs/slugs.md`); new names follow python-slugify. Recheck the map against
+  the database before bowerbird takes over.
 - The parser is a line-by-line port, quirks included (a regex's left-over
   `lastIndex`, first-match-only replaces). Check a parser change against the
   previous output on real docs. Release dates are the exception: `dates.py`
   converts only "January 2023" / "Jan 2023" and "2023/5/17" with `strptime` and
-  keeps anything else as written (with a warning), where catalog-sync's date-fns
-  also took a one-letter month or a 1 to 3 digit year.
+  keeps anything else as written (with a warning, once per value and run), where
+  catalog-sync's date-fns also took a one-letter month or a 1 to 3 digit year.
+  Misspelled months found in docs go in `MONTH_TYPOS` ("Sept", "Augus") and
+  words between month and year in `RELEASE_NOISE` ("Exclusive"); catalog-sync
+  kept those values as written, so adding one rewrites them on the next sync.
 - A colorway's `img` is its Cloudflare URL (`artisan/<maker>/<sculpt>/<id>`),
   set before upload; the image keeps that path after a sculpt rename. Images are
   never deleted here (`pelican prune` removes unused ones), and a failed upload

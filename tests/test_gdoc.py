@@ -119,7 +119,10 @@ def test_docs_merge_with_shifted_orders():
     ("text", "expected"),
     [
         ("January 2023", "Jan 2023"),
-        ("sept 2023", "sept 2023"),
+        ("Sept 2023", "Sep 2023"),  # MONTH_TYPOS
+        ("Augus 2018", "Aug 2018"),
+        ("April Exclusive 2022", "Apr 2022"),  # RELEASE_NOISE
+        ("Febuary 2023", "Febuary 2023"),  # kept, with a warning
         ("Jan 2023", "Jan 2023"),
         ("j 2023", "j 2023"),  # date-fns took a one-letter month
         ("Summer 2023", "Summer 2023"),
