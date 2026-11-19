@@ -25,8 +25,6 @@ DRIVE_URL = "https://www.googleapis.com/drive/v3/files/{id}"
 class DocNotFound(Exception):
     """Google answered 404: the doc was deleted or is no longer shared."""
 
-    code = 404
-
 
 class Google:
     def __init__(self, http: httpx.Client):
@@ -53,13 +51,19 @@ class Google:
         return self._get(DOCS_URL.format(id=document_id))
 
     def file(self, file_id: str) -> Any:
-        return self._get(DRIVE_URL.format(id=file_id), fields="*")
+        return self._get(
+            DRIVE_URL.format(id=file_id),
+            fields="capabilities/canReadRevisions,lastModifyingUser,modifiedTime",
+        )
 
     def revisions(self, file_id: str) -> list[Any]:
         revisions: list[Any] = []
         token = None
         while True:
-            params = {"fields": "*"}
+            params = {
+                "fields": "nextPageToken,revisions/lastModifyingUser",
+                "pageSize": 1000,
+            }
             if token:
                 params["pageToken"] = token
             page = self._get(DRIVE_URL.format(id=file_id) + "/revisions", **params)

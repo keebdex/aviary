@@ -77,6 +77,21 @@ def delivery_base_url() -> str:
     return f"https://imagedelivery.net/{require_env('CF_IMAGES_ACCOUNT_HASH')}"
 
 
+def delivery_url(base_url: str, image_id: str) -> str:
+    """The URL Keebdex stores for a Cloudflare image."""
+    return f"{base_url}/{image_id}/public"
+
+
+def to_image_id(url: object, base_url: str) -> str | None:
+    """`<base_url>/<id>/<variant>` -> `<id>` (ids may contain slashes); None
+    for anything else. Like JavaScript's slice(0, lastIndexOf('/')), a path
+    without a slash drops its last character, as catalog-sync did."""
+    if not isinstance(url, str) or not url.startswith(f"{base_url}/"):
+        return None
+    path = url[len(base_url) + 1 :]
+    return path[: path.rfind("/")]
+
+
 def _api(
     client: httpx.Client, method: str, path: str, token: str | None = None, **kwargs
 ) -> httpx.Response:

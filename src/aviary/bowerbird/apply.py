@@ -13,7 +13,8 @@ from itertools import batched
 
 from supabase import Client
 
-from aviary.bowerbird.plan import Row, SyncPlan, maker_sculpt_id
+from aviary.bowerbird.plan import SyncPlan, maker_sculpt_id
+from aviary.common.db import Row, fetch_all
 
 log = logging.getLogger(__name__)
 
@@ -21,37 +22,20 @@ SCULPTS = "artisan_sculpts"
 COLORWAYS = "artisan_colorways"
 COLLECTION_ITEMS = "user_collection_items"
 
-PAGE_SIZE = 1000
 # PostgREST filters live in the URL, so `in` lists stay short.
 IN_CHUNK_SIZE = 100
 INSERT_CHUNK_SIZE = 500
-
-
-def _select_all(client: Client, table: str, maker_id: str, source: str) -> list[Row]:
-    rows: list[Row] = []
-    while True:
-        response = (
-            client.table(table)
-            .select("*")
-            .eq("maker_id", maker_id)
-            .eq("source", source)
-            .order("id")
-            .range(len(rows), len(rows) + PAGE_SIZE - 1)
-            .execute()
-        )
-        rows += response.data
-        if len(response.data) < PAGE_SIZE:
-            return rows
 
 
 def fetch_stored(
     client: Client, maker_id: str, source: str
 ) -> tuple[list[Row], list[Row]]:
     """The maker's sculpts and colorways of `source`."""
-    return (
-        _select_all(client, SCULPTS, maker_id, source),
-        _select_all(client, COLORWAYS, maker_id, source),
-    )
+
+    def own(query):
+        return query.eq("maker_id", maker_id).eq("source", source)
+
+    return fetch_all(client, SCULPTS, "*", own), fetch_all(client, COLORWAYS, "*", own)
 
 
 class Writer:

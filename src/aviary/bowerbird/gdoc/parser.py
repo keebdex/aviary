@@ -11,8 +11,9 @@ or every row of a maker would be replaced. Where the JavaScript behaves oddly
 from typing import Any
 
 from aviary.bowerbird.gdoc import dates
-from aviary.bowerbird.gdoc.jsregex import JS_DOT, JS_SPACE, GlobalRegex
-from aviary.bowerbird.plan import Row
+from aviary.bowerbird.gdoc.jsregex import JS_DOT, JS_SPACE, GlobalRegex, js_trim
+from aviary.common.cf_images import delivery_url
+from aviary.common.db import Row
 from aviary.common.slug import url_slugify
 
 STEMS = "topre|mx|alps|tmx|choc|bs"
@@ -60,26 +61,16 @@ ATTRIBUTES = (
     ("cast", "mixed", "(ka_cast_mixed)"),
 )
 
-_JS_TRIM = "".join(
-    chr(c)
-    for c in (
-        *range(0x09, 0x0E),
-        0x20,
-        0xA0,
-        0x1680,
-        *range(0x2000, 0x200B),
-        0x2028,
-        0x2029,
-        0x202F,
-        0x205F,
-        0x3000,
-        0xFEFF,
-    )
-)
-
-
-def js_trim(text: str) -> str:
-    return text.strip(_JS_TRIM)
+# Markers some makers add to colorway names, checked in this order after the
+# common tags: (marker, fields it sets, text it removes, first match each).
+MAKER_MARKERS: dict[str, tuple[tuple[str, Row, tuple[str, ...]], ...]] = {
+    "fraktal-kaps": (
+        ("\u00b0", {"sale_type": "Commission"}, ("\u00b0",)),
+        ("*", {"qty": 1}, ("*",)),
+    ),
+    "hello": (("*", {"sale_type": "Commission"}, ("( * )", "*")),),
+    "keycat": (("(GB)", {"sale_type": "Group Buy"}, ("(GB)",)),),
+}
 
 
 def normalize(text: str) -> str:
@@ -180,12 +171,11 @@ def parse_colorways(
 
         texts = []
         for element in elements:
-            content = (element or {}).get("textRun", {}).get("content")
+            element = element or {}
+            content = element.get("textRun", {}).get("content")
             if content:
                 texts.append(js_trim(content))
-            object_id = (
-                (element or {}).get("inlineObjectElement", {}).get("inlineObjectId")
-            )
+            object_id = element.get("inlineObjectElement", {}).get("inlineObjectId")
             if object_id:
                 obj = document["inlineObjects"][object_id]
                 image = (
@@ -199,8 +189,9 @@ def parse_colorways(
                 else:
                     colorway.pop("remote_img", None)
                 colorway["colorway_id"] = obj["objectId"]
-                colorway["img"] = (
-                    f"{base_url}/artisan/{maker_id}/{sculpt['sculpt_id']}/{obj['objectId']}/public"
+                colorway["img"] = delivery_url(
+                    base_url,
+                    f"artisan/{maker_id}/{sculpt['sculpt_id']}/{obj['objectId']}",
                 )
 
         text = " ".join(texts)
@@ -241,19 +232,11 @@ def parse_colorways(
             colorway["stem"] = [normalize_stem(stem_text_match.group(1))]
             text = rx.stem_title.replace(text)
 
-        if maker_id == "fraktal-kaps":
-            if "\u00b0" in text:
-                colorway["sale_type"] = "Commission"
-                text = text.replace("\u00b0", "", 1)
-            if "*" in text:
-                colorway["qty"] = 1
-                text = text.replace("*", "", 1)
-        if maker_id == "hello" and "*" in text:
-            colorway["sale_type"] = "Commission"
-            text = text.replace("( * )", "", 1).replace("*", "", 1)
-        if maker_id == "keycat" and "(GB)" in text:
-            colorway["sale_type"] = "Group Buy"
-            text = text.replace("(GB)", "", 1)
+        for marker, fields, removed in MAKER_MARKERS.get(maker_id, ()):
+            if marker in text:
+                colorway.update(fields)
+                for part in removed:
+                    text = text.replace(part, "", 1)
 
         colorway["name"] = normalize(text)
         colorways.append(colorway)
@@ -273,18 +256,12 @@ def _is_header(table: Any) -> bool:
 def merge_consecutive_tables(tables: list[Any]) -> list[Any]:
     """A colorway grid split over several tables (a page break) becomes one;
     the rows are appended to the first, as catalog-sync does."""
-    merged = []
-    i = 0
-    while i < len(tables):
-        current = tables[i]
-        if not _is_header(current):
-            j = i + 1
-            while j < len(tables) and not _is_header(tables[j]):
-                current["table"]["tableRows"].extend(tables[j]["table"]["tableRows"])
-                j += 1
-            i = j - 1
-        merged.append(current)
-        i += 1
+    merged: list[Any] = []
+    for table in tables:
+        if merged and not _is_header(table) and not _is_header(merged[-1]):
+            merged[-1]["table"]["tableRows"].extend(table["table"]["tableRows"])
+        else:
+            merged.append(table)
     return merged
 
 

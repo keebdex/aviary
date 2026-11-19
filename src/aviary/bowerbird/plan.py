@@ -22,11 +22,13 @@ Rules (kept from catalog-sync's AGENTS.md, which explains them further):
   rows are pointed at the renamed slug.
 """
 
-from collections import defaultdict
+import operator
+from collections import defaultdict, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-Row = dict[str, Any]
+from aviary.common.db import Row
 
 # Colorway fields a sync may change, unless overridden in the app.
 SYNCABLE_FIELDS = ("name", "release", "qty", "photo_credit", "img", "stem")
@@ -53,17 +55,6 @@ class SyncPlan:
     # Every incoming colorway (plus preserved stored ones), with
     # `img_overridden` set on matched ones, for the image upload.
     colorways: list[Row] = field(default_factory=list)
-
-    @property
-    def changes_rows(self) -> bool:
-        return bool(
-            self.sculpt_inserts
-            or self.sculpt_updates
-            or self.colorway_inserts
-            or self.colorway_updates
-            or self.removed_colorway_ids
-            or self.removed_sculpts
-        )
 
 
 def maker_sculpt_id(row: Row) -> str:
@@ -113,6 +104,25 @@ def follow_renamed_sculpts(
             row["sculpt_id"] = sculpt_id
 
 
+def _field_updates(
+    incoming: Row,
+    stored: Row,
+    syncable: tuple[str, ...],
+    always: tuple[str, ...],
+    changed: Callable[[Any, Any], bool],
+) -> Row:
+    """The fields of `incoming` to write to `stored`: syncable ones unless
+    locked in `overridden_fields`, always-synced ones regardless; absent keys
+    never."""
+    overridden = stored.get("overridden_fields") or []
+    update: Row = {}
+    for name in (*(f for f in syncable if f not in overridden), *always):
+        value = incoming.get(name, _MISSING)
+        if value is not _MISSING and changed(value, stored.get(name)):
+            update[name] = value
+    return update
+
+
 def _plan_sculpts(
     sculpts: list[Row], stored_sculpts: list[Row], source: str, plan: SyncPlan
 ) -> None:
@@ -128,20 +138,13 @@ def _plan_sculpts(
             continue
 
         matched.add(stored["id"])
-        overridden = stored.get("overridden_fields") or []
-        update: Row = {}
-        for name in SCULPT_SYNCABLE_FIELDS:
-            value = incoming.get(name, _MISSING)
-            if (
-                name not in overridden
-                and value is not _MISSING
-                and value != stored.get(name)
-            ):
-                update[name] = value
-        for name in SCULPT_ALWAYS_SYNCED_FIELDS:
-            value = incoming.get(name, _MISSING)
-            if value is not _MISSING and value != stored.get(name):
-                update[name] = value
+        update = _field_updates(
+            incoming,
+            stored,
+            SCULPT_SYNCABLE_FIELDS,
+            SCULPT_ALWAYS_SYNCED_FIELDS,
+            operator.ne,
+        )
         if update:
             plan.sculpt_updates.append((stored["id"], update))
 
@@ -167,6 +170,7 @@ def plan_maker_sync(
     incoming = [dict(colorway) for table in tables for colorway in table["colorways"]]
 
     follow_renamed_sculpts(stored_sculpts, sculpts, incoming)
+    stored_by_key = {_colorway_key(c): c for c in stored_colorways}
 
     if preserve_missing:
         incoming_sculpt_ids = {s["sculpt_id"] for s in sculpts}
@@ -188,7 +192,6 @@ def plan_maker_sync(
         stored_counts: dict[str, int] = defaultdict(int)
         for c in stored_colorways:
             stored_counts[c["sculpt_id"]] += 1
-        stored_by_key = {_colorway_key(c): c for c in stored_colorways}
         for index, colorway in enumerate(incoming):
             stored = stored_by_key.get(_colorway_key(colorway))
             if stored is not None:
@@ -210,7 +213,6 @@ def plan_maker_sync(
 
     _plan_sculpts(sculpts, stored_sculpts, source, plan)
 
-    stored_by_key = {_colorway_key(c): c for c in stored_colorways}
     id_matched = {
         stored_by_key[_colorway_key(c)]["id"]
         for c in incoming
@@ -218,7 +220,7 @@ def plan_maker_sync(
     }
     # per-name queues, so duplicate or empty names don't collapse into one
     # candidate claimed by several incoming rows
-    name_candidates: dict[str, list[Row]] = defaultdict(list)
+    name_candidates: dict[str, deque[Row]] = defaultdict(deque)
     for c in stored_colorways:
         if c["id"] not in id_matched:
             name_candidates[_name_key(c)].append(c)
@@ -229,15 +231,10 @@ def plan_maker_sync(
         stored = by_colorway_id
         if stored is None:
             # colorway_id changed in the source: fall back to an unclaimed
-            # orphaned row with the same name
-            stored = next(
-                (
-                    c
-                    for c in name_candidates[_name_key(colorway)]
-                    if c["id"] not in claimed
-                ),
-                None,
-            )
+            # orphaned row with the same name (only this path claims them, so
+            # the first left in the queue is the first unclaimed)
+            candidates = name_candidates[_name_key(colorway)]
+            stored = candidates.popleft() if candidates else None
 
         if stored is None:
             row = {k: v for k, v in colorway.items() if k != "remote_img"}
@@ -249,19 +246,9 @@ def plan_maker_sync(
         claimed.add(stored["id"])
         overridden = stored.get("overridden_fields") or []
         colorway["img_overridden"] = "img" in overridden
-        update: Row = {}
-        for name in SYNCABLE_FIELDS:
-            value = colorway.get(name, _MISSING)
-            if (
-                name not in overridden
-                and value is not _MISSING
-                and is_field_changed(value, stored.get(name))
-            ):
-                update[name] = value
-        for name in ALWAYS_SYNCED_FIELDS:
-            value = colorway.get(name, _MISSING)
-            if value is not _MISSING and is_field_changed(value, stored.get(name)):
-                update[name] = value
+        update = _field_updates(
+            colorway, stored, SYNCABLE_FIELDS, ALWAYS_SYNCED_FIELDS, is_field_changed
+        )
         if by_colorway_id is None and "img" not in overridden:
             # matched by name only: resync the identity so later syncs match
             # by colorway_id again (the old image is left for pelican prune)

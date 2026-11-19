@@ -10,8 +10,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from aviary.common import cf_images
-from aviary.common.r2 import StoredFile
+from aviary.common.cf_images import SourceFile
+from aviary.common.db import PUBLISHED_FILTER
 from aviary.pelican import maintenance, sync
+from aviary.pelican.references import IMAGE_COLUMNS
 
 BASE = "https://imagedelivery.net/H"
 OLD = "2020-01-01T00:00:00Z"
@@ -27,7 +29,7 @@ class Query:
         return self
 
     def or_(self, condition):
-        assert condition == sync.OFFICIAL
+        assert condition == PUBLISHED_FILTER
         return self._filter(lambda r: r.get("review_status") in (None, "Approved"))
 
     @property
@@ -38,6 +40,11 @@ class Query:
     def is_(self, column, _value):
         negate, self._negate = self._negate, False
         return self._filter(lambda r: (r.get(column) is None) != negate)
+
+    def like(self, column, pattern):
+        negate, self._negate = self._negate, False
+        prefix = pattern.removesuffix("*").replace("\\_", "_")
+        return self._filter(lambda r: str(r.get(column)).startswith(prefix) != negate)
 
     def eq(self, column, value):
         return self._filter(lambda r: r.get(column) == value)
@@ -148,7 +155,7 @@ def test_pending_suggestion_images_are_referenced(monkeypatch):
 
 def test_restore_uploads_missing_images_from_their_backup(monkeypatch):
     calls = cloudflare(monkeypatch, {f"i{n}": OLD for n in range(20)})
-    bucket = FakeBucket({"images/gone": StoredFile(b"x", "image/png")})
+    bucket = FakeBucket({"images/gone": SourceFile(b"x", "image/png")})
     db = keysets("gone", "no-backup", *[f"i{n}" for n in range(20)])
     failed = maintenance.restore(
         FakeClient(db), None, bucket, BASE, dry_run=False, force=False
@@ -238,3 +245,37 @@ def test_sync_plans_published_external_images_only():
         (f"keyset/gmk/a/kit/10/base-kit/{sync.crc32_hex('https://x/k.png')}", "")
     ]
     assert variants == colorways == []
+
+
+def test_sync_writes_only_columns_prune_knows():
+    row = {
+        "id": 1,
+        "profile_keyset_id": "gmk/a",
+        "brand_keyboard_slug": "b/k",
+        "maker_sculpt_id": "m/s",
+        "maker_id": "m",
+        "sculpt_id": "s",
+        "colorway_id": "c",
+        "release_id": 1,
+        "variant_name": "V",
+        "kit_id": "k",
+        "name": "K",
+    } | {
+        column: "https://x/y.png"
+        for column in ("img", "order_graph", "order_history", "img_front", "img_back")
+    }
+    db = {
+        table: [dict(row)]
+        for table in (
+            "keysets",
+            "keyset_kits",
+            "keyboards",
+            "keyboard_variants",
+            "artisan_sculpts",
+            "artisan_colorways",
+        )
+    }
+    uploads = [u for group in sync.plan_uploads(FakeClient(db), BASE) for u in group]
+    assert uploads
+    for upload in uploads:
+        assert upload.column in IMAGE_COLUMNS[upload.table]

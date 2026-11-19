@@ -5,44 +5,33 @@ by image id (`images/<id>`), so a restore re-uploads each file under its old
 id and every stored delivery URL works again.
 """
 
-from dataclasses import dataclass
 from datetime import datetime
-from functools import cached_property
 
 import boto3
 import httpx
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from aviary.common.cf_images import SourceFile
 from aviary.common.config import require_env
 
 IMAGES_PREFIX = "images/"
 TRASH_PREFIX = "trash/images/"
 
 
-@dataclass(frozen=True)
-class StoredFile:
-    data: bytes
-    content_type: str | None
-
-
 class Bucket:
     def __init__(self) -> None:
         self.account_id = require_env("R2_ACCOUNT_ID")
         self.name = require_env("R2_BUCKET")
-        self._key_id = require_env("R2_ACCESS_KEY_ID")
-        self._secret = require_env("R2_SECRET_ACCESS_KEY")
-
-    @cached_property
-    def s3(self):
-        # Checksums only when required: R2 rejects some of the integrity
-        # headers newer SDKs send by default.
-        return boto3.client(
+        # Built here, not lazily: the jobs share it across threads, and two
+        # threads building it at once would make two. Checksums only when
+        # required: R2 rejects some integrity headers newer SDKs send.
+        self.s3 = boto3.client(
             "s3",
             region_name="auto",
             endpoint_url=f"https://{self.account_id}.r2.cloudflarestorage.com",
-            aws_access_key_id=self._key_id,
-            aws_secret_access_key=self._secret,
+            aws_access_key_id=require_env("R2_ACCESS_KEY_ID"),
+            aws_secret_access_key=require_env("R2_SECRET_ACCESS_KEY"),
             config=Config(
                 request_checksum_calculation="when_required",
                 response_checksum_validation="when_required",
@@ -67,7 +56,7 @@ class Bucket:
             Bucket=self.name, Key=key, Body=data, Metadata=metadata, **extra
         )
 
-    def get(self, key: str) -> StoredFile | None:
+    def get(self, key: str) -> SourceFile | None:
         """The object, or None when the key does not exist."""
         try:
             response = self.s3.get_object(Bucket=self.name, Key=key)
@@ -75,7 +64,7 @@ class Bucket:
             if error.response.get("Error", {}).get("Code") == "NoSuchKey":
                 return None
             raise
-        return StoredFile(response["Body"].read(), response.get("ContentType"))
+        return SourceFile(response["Body"].read(), response.get("ContentType"))
 
     def move(self, source: str, target: str) -> None:
         """Copy, then delete: a failed delete leaves the object in both places

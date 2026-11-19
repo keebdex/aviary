@@ -1,6 +1,6 @@
 """The sync planner: the rules catalog-sync's updateMakerDatabase follows."""
 
-from aviary.bowerbird.plan import is_field_changed, plan_maker_sync
+from aviary.bowerbird.plan import SyncPlan, is_field_changed, plan_maker_sync
 
 
 def sculpt(sculpt_id, row_id=None, **fields):
@@ -34,7 +34,7 @@ def plan(tables, sculpts=(), colorways=(), **options):
 
 def test_empty_input_plans_nothing():
     result = plan([], [sculpt("a", 1)], [colorway("a", "x", 10)])
-    assert not result.changes_rows
+    assert result == SyncPlan()
 
 
 def test_new_rows_are_inserted_with_the_source_and_without_remote_img():

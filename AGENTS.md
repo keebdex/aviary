@@ -24,7 +24,10 @@ separate repository).
   it.
   - `config.py`: `require_env(name)` for settings.
   - `db.py`: `create_supabase(source=None)`, the only way to create a Supabase
-    client (see "Revision sources").
+    client (see "Revision sources"); `fetch_all(client, table, columns, where)`
+    for every paged read; `PUBLISHED_FILTER` (Keebdex's published rule); `Row`.
+  - `pool.py`: `run_each(items, work)`, network work a few at a time
+    (`CONCURRENCY`), counting failures.
   - `http.py`: `create_http_client()` for reading websites.
   - `report.py`: `configure_logging()` and `write_summary(markdown)` (GitHub
     Actions job summary).
@@ -44,7 +47,9 @@ separate repository).
   is the `lorikeet` command.
 - `src/aviary/bowerbird/`: the artisan sync, ported from `../catalog-sync`.
   `gdoc/` holds the Google Docs side (`parser.py`, `dates.py`, `jsregex.py`,
-  `google.py` for the read-only API calls, `importer.py`). `makers/` holds one
+  `google.py` for the read-only API calls, `importer.py`); `jsregex.py` also
+  holds JavaScript's whitespace (`JS_WHITESPACE`, `js_trim`), and per-maker name
+  markers are data in `parser.MAKER_MARKERS`, not branches. `makers/` holds one
   scraper per maker (`SCRAPERS`, `PARTIAL_MAKERS`), `plan.py` the pure port of
   catalog-sync's `updateMakerDatabase`, `apply.py` the reads and writes,
   `images.py` the colorway image ids and uploads, `__main__.py` the `bowerbird`
@@ -212,9 +217,10 @@ Image columns: `artisan_colorways.img`, `keysets.img` / `order_graph` /
 `order_history`, `keyset_kits.img`, `keyboard_variants.img_front` / `img_back`.
 A Cloudflare image is stored as `<delivery base>/<id>/public` (ids may contain
 slashes); anything else is an external URL, which Keebdex shows as it is.
-`pelican/references.py` lists them in `IMAGE_COLUMNS`: add a column there
-whenever a table starts storing Cloudflare images, or `prune` deletes its
-images.
+`cf_images.delivery_url` builds that URL and `cf_images.to_image_id` reads it
+back. `pelican/references.py` lists the columns in `IMAGE_COLUMNS`, which `sync`
+uploads into too (a test checks it): add a column there whenever a table starts
+storing Cloudflare images, or `prune` deletes its images.
 
 - `pelican sync` (`image-sync` revision source) uploads external images of
   published rows (the row and its keyset, keyboard, or sculpt null or Approved)

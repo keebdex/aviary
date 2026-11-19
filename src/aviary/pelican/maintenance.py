@@ -9,7 +9,6 @@ used.
 
 import logging
 import time
-from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
@@ -17,12 +16,12 @@ import httpx
 from supabase import Client
 
 from aviary.common import cf_images
+from aviary.common.pool import run_each
 from aviary.common.r2 import IMAGES_PREFIX, TRASH_PREFIX, Bucket
 from aviary.pelican.references import referenced_images
 
 log = logging.getLogger(__name__)
 
-CONCURRENCY = 5
 # Images uploaded in the Keebdex app before their record is saved (e.g. a
 # submission still being filled in) aren't referenced yet: never prune them.
 MIN_PRUNE_AGE_SECONDS = 7 * 24 * 60 * 60
@@ -37,10 +36,14 @@ class Refused(RuntimeError):
     """The numbers look like a bad read; nothing was changed."""
 
 
-def _each(items: Iterable, work: Callable[[object], bool]) -> int:
-    """Run `work` on every item, CONCURRENCY at a time; how many failed."""
-    with ThreadPoolExecutor(CONCURRENCY) as pool:
-        return sum(1 for ok in pool.map(work, items) if not ok)
+def _references_and_images(
+    client: Client, http: httpx.Client, base_url: str
+) -> tuple[set[str], list[cf_images.CloudflareImage]]:
+    """The referenced image ids and the Cloudflare listing, read at once."""
+    with ThreadPoolExecutor(2) as pool:
+        referenced = pool.submit(referenced_images, client, base_url)
+        remote = pool.submit(cf_images.list_images, http)
+        return referenced.result(), remote.result()
 
 
 def _parse_time(value: str) -> datetime:
@@ -61,8 +64,7 @@ def restore(
 ) -> int:
     """Re-upload, from R2 and under the same id, every referenced image
     Cloudflare no longer has. Returns how many failed."""
-    referenced = referenced_images(client, base_url)
-    remote = cf_images.list_images(http)
+    referenced, remote = _references_and_images(client, http, base_url)
     if not remote:
         raise Refused("No Cloudflare images listed, refusing to restore")
 
@@ -88,10 +90,9 @@ def restore(
         if backup is None:
             log.warning("No backup to restore %s from", image_id)
             return True
-        file = cf_images.SourceFile(backup.data, backup.content_type)
-        return cf_images.upload_file(http, image_id, file).ok
+        return cf_images.upload_file(http, image_id, backup).ok
 
-    failed = _each(missing, restore_one)
+    failed = run_each(missing, restore_one)
     log.info("Restored %d images", len(missing) - failed)
     return failed
 
@@ -102,8 +103,7 @@ def restore(
 def prune(client: Client, http: httpx.Client, base_url: str, *, dry_run: bool) -> int:
     """Delete Cloudflare images no row references, older than a week.
     Returns how many deletions failed (logged, not fatal, as catalog-sync)."""
-    referenced = referenced_images(client, base_url)
-    remote = cf_images.list_images(http)
+    referenced, remote = _references_and_images(client, http, base_url)
     if not referenced:
         raise Refused("No referenced images found, refusing to prune")
 
@@ -119,7 +119,7 @@ def prune(client: Client, http: httpx.Client, base_url: str, *, dry_run: bool) -
     if dry_run:
         log.info("[DRY RUN] Would delete %d images", len(orphaned))
         return 0
-    return _each(orphaned, lambda image_id: cf_images.delete_image(http, image_id))
+    return run_each(orphaned, lambda image_id: cf_images.delete_image(http, image_id))
 
 
 # Backup --------------------------------------------------------------------
@@ -179,7 +179,7 @@ def _back_up_missing(
             return False
         return True
 
-    failed = _each(missing, back_up)
+    failed = run_each(missing, back_up)
     log.info("Backed up %d images", len(missing) - failed)
     return failed
 
@@ -224,7 +224,7 @@ def _trash_orphaned(
             return False
         return True
 
-    failed = _each(orphaned, trash)
+    failed = run_each(orphaned, trash)
     log.info("Trashed %d backups", len(orphaned) - failed)
     return failed
 

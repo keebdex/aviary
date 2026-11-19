@@ -15,7 +15,8 @@ from supabase import Client
 
 from aviary.bowerbird.gdoc.google import DocNotFound, Google
 from aviary.bowerbird.gdoc.parser import Regexes, parse_document
-from aviary.bowerbird.plan import Row, SyncPlan
+from aviary.bowerbird.plan import SyncPlan
+from aviary.common.db import PUBLISHED_FILTER, Row, fetch_all
 
 log = logging.getLogger(__name__)
 
@@ -27,17 +28,16 @@ def fetch_makers(client: Client, maker_ids: list[str] | None = None) -> list[Row
     """Published makers whose doc sync is on and who have docs. `.neq` keeps
     catalog-sync's semantics: a null `deleted` or `disable_google_sync` is
     excluded too."""
-    query = (
-        client.table(MAKERS)
-        .select("*")
-        .or_("review_status.is.null,review_status.eq.Approved")
-        .neq("deleted", True)
-        .neq("disable_google_sync", True)
-        .order("maker_id")
-    )
-    if maker_ids:
-        query = query.in_("maker_id", maker_ids)
-    makers = query.execute().data
+
+    def syncable(query):
+        query = (
+            query.or_(PUBLISHED_FILTER)
+            .neq("deleted", True)
+            .neq("disable_google_sync", True)
+        )
+        return query.in_("maker_id", maker_ids) if maker_ids else query
+
+    makers = fetch_all(client, MAKERS, "*", syncable)
     return [
         m
         for m in makers
@@ -81,31 +81,20 @@ def contributors_from(
     """The maker's contributors plus everyone who edited the doc, once each,
     and the doc's modified time."""
     file = google.file(file_id)
-    people = list(known)
     if (file.get("capabilities") or {}).get("canReadRevisions"):
-        seen = set()
-        for revision in google.revisions(file_id):
-            user = revision.get("lastModifyingUser")
-            if not user:
-                continue  # catalog-sync would fail the maker here
-            if user.get("permissionId") in seen:
-                continue
-            seen.add(user.get("permissionId"))
-            people.append(
-                {
-                    "name": user.get("displayName"),
-                    "picture": user.get("photoLink"),
-                    "pid": user.get("permissionId"),
-                }
-            )
-    elif user := file.get("lastModifyingUser"):
-        people.append(
-            {
-                "name": user.get("displayName"),
-                "picture": user.get("photoLink"),
-                "pid": user.get("permissionId"),
-            }
-        )
+        users = [r.get("lastModifyingUser") for r in google.revisions(file_id)]
+    else:
+        users = [file.get("lastModifyingUser")]
+    # a revision without a user is skipped (catalog-sync would fail the maker)
+    people = list(known) + [
+        {
+            "name": user.get("displayName"),
+            "picture": user.get("photoLink"),
+            "pid": user.get("permissionId"),
+        }
+        for user in users
+        if user
+    ]
 
     unique, pids = [], set()
     for person in people:
@@ -141,8 +130,7 @@ def load_catalog(
 
     if not documents:
         return None, available, missing
-    catalog = merge_documents(documents) if len(documents) > 1 else documents[0]
-    return list(catalog.values()), available, missing
+    return list(merge_documents(documents).values()), available, missing
 
 
 def rows_modified(plan: SyncPlan) -> bool:

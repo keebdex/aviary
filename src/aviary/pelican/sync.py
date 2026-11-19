@@ -17,37 +17,33 @@ readable id and points the row at the Cloudflare copy.
 """
 
 import logging
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import httpx
 from supabase import Client
 
 from aviary.common import cf_images
+from aviary.common.db import PUBLISHED_FILTER, Row, fetch_all
 from aviary.common.ids import crc32_hex
+from aviary.common.pool import run_each
 from aviary.common.slug import url_slugify
-from aviary.pelican.references import Row, fetch_all
+from aviary.pelican.references import IMAGE_COLUMNS
 
 log = logging.getLogger(__name__)
-
-OFFICIAL = "review_status.is.null,review_status.eq.Approved"
-KEYSET_IMAGE_COLUMNS = ("img", "order_graph", "order_history")
-KEYBOARD_SIDES = ("front", "back")
-CONCURRENCY = 5
-
-_KEEP = object()  # a 404 leaves the row's image alone
 
 
 @dataclass(frozen=True)
 class Upload:
     table: str
-    key: tuple[str, Any]  # the column and value that find the row
+    key_column: str  # with key_value, finds the row to update
+    key_value: Any
     column: str
     image_id: str
     source: str
-    cleared: Any  # what a 404 sets the column to, or _KEEP
+    clear_on_404: bool  # a gone source clears the column to `cleared`
+    cleared: Any = None
 
 
 def keyset_image_id(keyset: Row, column: str = "img") -> str:
@@ -67,11 +63,12 @@ def kit_image_id(kit: Row) -> str:
     )
 
 
-def variant_image_id(variant: Row, side: str) -> str:
+def variant_image_id(variant: Row, column: str) -> str:
+    side = column.removeprefix("img_")
     return (
         f"keyboard/{variant['brand_keyboard_slug']}/{variant['release_id']}"
         f"/{url_slugify(variant['variant_name'])}/{side}"
-        f"/{crc32_hex(variant[f'img_{side}'])}"
+        f"/{crc32_hex(variant[column])}"
     )
 
 
@@ -87,116 +84,147 @@ def is_unsynced(url: Any, base_url: str) -> bool:
     return bool(url) and base_url not in url
 
 
-def _official_keys(client: Client, table: str, column: str) -> set:
-    rows = fetch_all(client, table, f"id, {column}", lambda q: q.or_(OFFICIAL))
+def _published(query):
+    return query.or_(PUBLISHED_FILTER)
+
+
+def _published_keys(client: Client, table: str, column: str) -> set:
+    rows = fetch_all(client, table, f"id, {column}", _published)
     return {row[column] for row in rows}
 
 
+def _like_prefix(prefix: str) -> str:
+    """A PostgREST `like` pattern for values starting with `prefix` (`*` is
+    its wildcard; `_` is escaped, or it would match any character)."""
+    return prefix.replace("\\", "\\\\").replace("_", "\\_") + "/*"
+
+
 def _with_image(query):
-    return query.or_(OFFICIAL).not_.is_("img", "null").neq("img", "")
+    return _published(query).not_.is_("img", "null").neq("img", "")
 
 
 def plan_uploads(client: Client, base_url: str) -> list[list[Upload]]:
     """The uploads to make, in catalog-sync's order: keysets, kits, keyboard
     variants, colorways."""
+    keyset_columns = IMAGE_COLUMNS["keysets"]
     keysets = fetch_all(
         client,
         "keysets",
-        "id, profile_keyset_id, " + ", ".join(KEYSET_IMAGE_COLUMNS),
-        lambda q: q.or_(OFFICIAL),
+        "id, profile_keyset_id, " + ", ".join(keyset_columns),
+        _published,
     )
-    official_keysets = _official_keys(client, "keysets", "profile_keyset_id")
+    published_keysets = {k["profile_keyset_id"] for k in keysets}
     kits = [
         kit
         for kit in fetch_all(client, "keyset_kits", "*", _with_image)
-        if kit["profile_keyset_id"] in official_keysets
+        if kit["profile_keyset_id"] in published_keysets
     ]
-    official_keyboards = _official_keys(client, "keyboards", "brand_keyboard_slug")
+    keyboards = _published_keys(client, "keyboards", "brand_keyboard_slug")
     variants = [
         variant
-        for variant in fetch_all(
-            client, "keyboard_variants", "*", lambda q: q.or_(OFFICIAL)
-        )
-        if variant["brand_keyboard_slug"] in official_keyboards
+        for variant in fetch_all(client, "keyboard_variants", "*", _published)
+        if variant["brand_keyboard_slug"] in keyboards
     ]
-    official_sculpts = _official_keys(client, "artisan_sculpts", "maker_sculpt_id")
+    sculpts = _published_keys(client, "artisan_sculpts", "maker_sculpt_id")
+    # Nearly every colorway already points at Cloudflare: leave those out in
+    # the query (is_unsynced below still decides).
     colorways = [
         colorway
         for colorway in fetch_all(
             client,
             "artisan_colorways",
             "id, maker_id, sculpt_id, maker_sculpt_id, colorway_id, img",
-            _with_image,
+            lambda q: _with_image(q).not_.like("img", _like_prefix(base_url)),
         )
-        if colorway["maker_sculpt_id"] in official_sculpts
+        if colorway["maker_sculpt_id"] in sculpts
     ]
 
-    unsynced = lambda url: is_unsynced(url, base_url)  # noqa: E731
     return [
         [
             Upload(
-                "keysets",
-                ("profile_keyset_id", k["profile_keyset_id"]),
-                column,
-                keyset_image_id(k, column),
-                k[column],
-                None,
+                table="keysets",
+                key_column="profile_keyset_id",
+                key_value=k["profile_keyset_id"],
+                column=column,
+                image_id=keyset_image_id(k, column),
+                source=k[column],
+                clear_on_404=True,
             )
             for k in keysets
-            for column in KEYSET_IMAGE_COLUMNS
-            if unsynced(k.get(column))
-        ],
-        [
-            Upload("keyset_kits", ("id", k["id"]), "img", kit_image_id(k), k["img"], "")
-            for k in kits
-            if unsynced(k.get("img"))
+            for column in keyset_columns
+            if is_unsynced(k.get(column), base_url)
         ],
         [
             Upload(
-                "keyboard_variants",
-                ("id", v["id"]),
-                f"img_{side}",
-                variant_image_id(v, side),
-                v[f"img_{side}"],
-                _KEEP,
+                table="keyset_kits",
+                key_column="id",
+                key_value=k["id"],
+                column="img",
+                image_id=kit_image_id(k),
+                source=k["img"],
+                clear_on_404=True,
+                cleared="",
+            )
+            for k in kits
+            if is_unsynced(k.get("img"), base_url)
+        ],
+        [
+            Upload(
+                table="keyboard_variants",
+                key_column="id",
+                key_value=v["id"],
+                column=column,
+                image_id=variant_image_id(v, column),
+                source=v[column],
+                clear_on_404=False,
             )
             for v in variants
-            for side in KEYBOARD_SIDES
-            if unsynced(v.get(f"img_{side}"))
+            for column in IMAGE_COLUMNS["keyboard_variants"]
+            if is_unsynced(v.get(column), base_url)
         ],
         [
             Upload(
-                "artisan_colorways",
-                ("id", c["id"]),
-                "img",
-                colorway_image_id(c),
-                c["img"],
-                None,
+                table="artisan_colorways",
+                key_column="id",
+                key_value=c["id"],
+                column="img",
+                image_id=colorway_image_id(c),
+                source=c["img"],
+                clear_on_404=True,
             )
             for c in colorways
-            if unsynced(c.get("img"))
+            if is_unsynced(c.get("img"), base_url)
         ],
     ]
 
 
-def _update(client: Client, upload: Upload, value: Any) -> None:
-    column, key = upload.key
+def _update(client: Client, upload: Upload, value: Any) -> bool:
     try:
         client.table(upload.table).update({upload.column: value}).eq(
-            column, key
+            upload.key_column, upload.key_value
         ).execute()
     except Exception:
-        log.exception("Unable to update %s %s=%s", upload.table, column, key)
+        log.exception(
+            "Unable to update %s %s=%s",
+            upload.table,
+            upload.key_column,
+            upload.key_value,
+        )
+        return False
+    return True
 
 
 def _sync_one(
     client: Client, http: httpx.Client, base_url: str, upload: Upload
-) -> None:
+) -> bool:
     result = cf_images.upload_image(http, upload.image_id, upload.source)
     if result.ok:
-        _update(client, upload, f"{base_url}/{upload.image_id}/public")
-    elif result.status == 404 and upload.cleared is not _KEEP:
+        return _update(
+            client, upload, cf_images.delivery_url(base_url, upload.image_id)
+        )
+    if result.status == 404 and upload.clear_on_404:
         _update(client, upload, upload.cleared)
+    return False
 
 
 def run(client: Client, http: httpx.Client, base_url: str, *, dry_run: bool) -> None:
@@ -210,7 +238,8 @@ def run(client: Client, http: httpx.Client, base_url: str, *, dry_run: bool) -> 
                 log.info("[DRY RUN] Would upload %s", upload.image_id)
         return
 
-    sync: Callable[[Upload], None] = lambda u: _sync_one(client, http, base_url, u)  # noqa: E731
-    for uploads in groups:
-        with ThreadPoolExecutor(CONCURRENCY) as pool:
-            list(pool.map(sync, uploads))
+    # keysets, then kits, then variants, then colorways, as catalog-sync did
+    sync = partial(_sync_one, client, http, base_url)
+    failed = sum(run_each(uploads, sync) for uploads in groups)
+    if failed:
+        log.warning("%d images were not synced (logged above)", failed)
