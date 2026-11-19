@@ -1,0 +1,38 @@
+name: lorikeet
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Report what would be added without writing to Keebdex
+        type: boolean
+        default: true
+  # Paused until a dry run against Keebdex has been checked. To turn it on:
+  # schedule:
+  #   - cron: '0 3 1 * *' # Monthly, on the 1st at 03:00 UTC; RAL rarely changes
+
+concurrency:
+  group: lorikeet
+  cancel-in-progress: false
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+
+jobs:
+  ral:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+
+      # Scheduled runs write; manual runs are dry runs unless unticked.
+      - name: Sync RAL colors
+        run: uv run lorikeet ral ${{ inputs.dry-run && '--dry-run' || '' }}

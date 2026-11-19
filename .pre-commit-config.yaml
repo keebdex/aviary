@@ -1,0 +1,24 @@
+# Install the hooks once per clone:
+#   uv run pre-commit install --hook-type pre-commit --hook-type commit-msg
+default_install_hook_types: [pre-commit, commit-msg]
+
+repos:
+  # ruff runs from the project environment, so its version follows uv.lock.
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.5.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
