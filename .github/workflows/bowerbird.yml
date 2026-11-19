@@ -1,0 +1,39 @@
+name: bowerbird
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Log every write and upload without making it
+        type: boolean
+        default: true
+  # No schedule yet: catalog-sync's artisan-sync still runs the maker scraper.
+  # Add one here only after removing it there, so the two never both write.
+
+concurrency:
+  group: bowerbird
+  cancel-in-progress: false
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+  CF_IMAGES_ACCOUNT_ID: ${{ secrets.CF_IMAGES_ACCOUNT_ID }}
+  CF_IMAGES_API_KEY: ${{ secrets.CF_IMAGES_API_KEY }}
+  CF_IMAGES_ACCOUNT_HASH: ${{ secrets.CF_IMAGES_ACCOUNT_HASH }}
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+
+      - name: Sync maker websites
+        run: uv run bowerbird scrape ${{ inputs.dry-run && '--dry-run' || '' }}
