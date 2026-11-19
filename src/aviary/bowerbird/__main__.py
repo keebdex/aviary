@@ -204,11 +204,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     source = importer.SOURCE if args.command == "gdoc" else SCRAPER_SOURCE
     try:
         run = start(source, args.dry_run)
-        with run.http:
+        # start() already used the client, so it can't be entered with `with`
+        try:
             if args.command == "gdoc":
                 failed = sync_documents(run, args.maker)
             else:
                 failed = sync_websites(run, args.maker or sorted(SCRAPERS))
+        finally:
+            run.http.close()
     except MissingSettingError as error:
         log.error("%s; see .env.example", error)
         return 1
