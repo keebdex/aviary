@@ -29,13 +29,20 @@ INSERT_CHUNK_SIZE = 500
 
 def fetch_stored(
     client: Client, maker_id: str, source: str
-) -> tuple[list[Row], list[Row]]:
-    """The maker's sculpts and colorways of `source`."""
+) -> tuple[list[Row], list[Row], list[Row]]:
+    """The maker's sculpts and colorways of `source`, and its sculpts of every
+    other source (made in the app, or by another sync)."""
 
-    def own(query):
-        return query.eq("maker_id", maker_id).eq("source", source)
+    def maker(query):
+        return query.eq("maker_id", maker_id)
 
-    return fetch_all(client, SCULPTS, "*", own), fetch_all(client, COLORWAYS, "*", own)
+    sculpts = fetch_all(client, SCULPTS, "*", maker)
+    own = [s for s in sculpts if s.get("source") == source]
+    others = [s for s in sculpts if s.get("source") != source]
+    colorways = fetch_all(
+        client, COLORWAYS, "*", lambda query: maker(query).eq("source", source)
+    )
+    return own, colorways, others
 
 
 class Writer:

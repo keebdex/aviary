@@ -159,3 +159,26 @@ def test_incoming_rows_follow_a_sculpt_renamed_in_keebdex():
     assert not result.removed_sculpts
     assert result.colorway_inserts == []
     assert result.removed_colorway_ids == []
+
+
+def test_a_sculpt_another_source_holds_takes_colorways_but_is_not_inserted():
+    # keycat: the sculpt came from its doc, the website adds colorways to it
+    gdoc_sculpt = sculpt("a", 1, cast="Resin") | {"source": "gdoc"}
+    result = plan(
+        [table("a", colorway("a", "x"), cast="Clay")],
+        other_sculpts=[gdoc_sculpt],
+    )
+    assert result.sculpt_inserts == []
+    assert result.sculpt_updates == []
+    assert result.removed_sculpts == []
+    assert [c["colorway_id"] for c in result.colorway_inserts] == ["x"]
+
+
+def test_rows_follow_a_renamed_sculpt_another_source_holds():
+    gdoc_sculpt = sculpt("new-name", 1, source_slug="old-name") | {"source": "gdoc"}
+    result = plan(
+        [table("old-name", colorway("old-name", "x"))],
+        other_sculpts=[gdoc_sculpt],
+    )
+    assert result.sculpt_inserts == []
+    assert [c["sculpt_id"] for c in result.colorway_inserts] == ["new-name"]

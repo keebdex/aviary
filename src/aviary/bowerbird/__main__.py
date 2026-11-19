@@ -79,7 +79,9 @@ class Run:
         preserve_missing: bool,
         available_document_ids: Sequence[str] = (),
     ) -> SyncPlan:
-        stored_sculpts, stored_colorways = fetch_stored(self.client, maker_id, source)
+        stored_sculpts, stored_colorways, other_sculpts = fetch_stored(
+            self.client, maker_id, source
+        )
         plan = plan_maker_sync(
             tables,
             stored_sculpts,
@@ -87,6 +89,7 @@ class Run:
             source=source,
             preserve_missing=preserve_missing,
             available_document_ids=set(available_document_ids),
+            other_sculpts=other_sculpts,
         )
         apply_plan(self.client, plan, dry_run=self.dry_run)
         return plan

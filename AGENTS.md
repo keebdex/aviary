@@ -209,6 +209,11 @@ source: it is JavaScript's `undefined` versus `null`.
 - Rows are scoped by `source`, so a colorway added in the app and the same
   colorway later appearing in a doc are never reconciled: the doc's copy is
   inserted as a new row (rare duplicates).
+- A sculpt another source already holds (keycat's sculpts are in both its doc
+  and on its website) is not inserted again: the incoming colorways go under
+  it, and the sculpt stays that source's, which alone updates or removes it.
+  catalog-sync inserted it and, once insert errors stopped being ignored,
+  failed the whole maker on the primary key.
 - In a partial sync the index used for a new colorway's `order` is global across
   all incoming colorways, not per sculpt. Gaps are harmless: only the relative
   order matters.

@@ -10,7 +10,11 @@ A key that is absent means "not provided" (JavaScript's `undefined`) and never
 syncs, while a key set to None clears the stored value, as in catalog-sync.
 
 Rules (kept from catalog-sync's AGENTS.md, which explains them further):
-- Only rows of the sync's own `source` are read, matched, or removed.
+- Only rows of the sync's own `source` are matched, updated, or removed.
+  A sculpt another source already holds (keycat's sculpts are in both its doc
+  and its website) is left to that source: its colorways go under it, and it
+  is not inserted again. catalog-sync inserted it and failed on the primary
+  key, which stopped the whole maker.
 - Updates patch only the syncable fields, skipping those in the row's
   `overridden_fields`; the always-synced fields are metadata the app cannot
   edit, so they sync regardless.
@@ -19,7 +23,7 @@ Rules (kept from catalog-sync's AGENTS.md, which explains them further):
 - With `preserve_missing`, rows absent from the input are kept unless their
   `source_document_id` is one of `available_document_ids` (a doc that synced).
 - A sculpt renamed in Keebdex keeps its source slug in `source_slug`; incoming
-  rows are pointed at the renamed slug.
+  rows are pointed at the renamed slug, whichever source holds the sculpt.
 """
 
 import operator
@@ -124,13 +128,20 @@ def _field_updates(
 
 
 def _plan_sculpts(
-    sculpts: list[Row], stored_sculpts: list[Row], source: str, plan: SyncPlan
+    sculpts: list[Row],
+    stored_sculpts: list[Row],
+    other_sculpts: list[Row],
+    source: str,
+    plan: SyncPlan,
 ) -> None:
     stored_by_key = {maker_sculpt_id(s): s for s in stored_sculpts}
+    others = {maker_sculpt_id(s) for s in other_sculpts}
     matched: set[int] = set()
 
     for incoming in sculpts:
         stored = stored_by_key.get(maker_sculpt_id(incoming))
+        if stored is None and maker_sculpt_id(incoming) in others:
+            continue  # another source's sculpt: not ours to insert or update
         if stored is None:
             plan.sculpt_inserts.append(
                 {**incoming, "source": source, "overridden_fields": []}
@@ -159,9 +170,12 @@ def plan_maker_sync(
     source: str,
     preserve_missing: bool = False,
     available_document_ids: frozenset[str] | set[str] = frozenset(),
+    other_sculpts: list[Row] = (),
 ) -> SyncPlan:
     """Plan the sync of one maker. `tables` are incoming sculpts, each with a
-    `colorways` list; `stored_*` are the maker's rows of `source`."""
+    `colorways` list; `stored_*` are the maker's rows of `source`, and
+    `other_sculpts` its sculpts of every other source (or none)."""
+    other_sculpts = list(other_sculpts)
     plan = SyncPlan()
     if not tables:
         return plan
@@ -169,7 +183,7 @@ def plan_maker_sync(
     sculpts = [{k: v for k, v in table.items() if k != "colorways"} for table in tables]
     incoming = [dict(colorway) for table in tables for colorway in table["colorways"]]
 
-    follow_renamed_sculpts(stored_sculpts, sculpts, incoming)
+    follow_renamed_sculpts([*stored_sculpts, *other_sculpts], sculpts, incoming)
     stored_by_key = {_colorway_key(c): c for c in stored_colorways}
 
     if preserve_missing:
@@ -211,7 +225,7 @@ def plan_maker_sync(
             )
         ]
 
-    _plan_sculpts(sculpts, stored_sculpts, source, plan)
+    _plan_sculpts(sculpts, stored_sculpts, other_sculpts, source, plan)
 
     id_matched = {
         stored_by_key[_colorway_key(c)]["id"]
