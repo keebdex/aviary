@@ -97,7 +97,9 @@ uv run --env-file .env bowerbird scrape --dry-run
 - Colorway images are uploaded to Cloudflare Images under fixed ids. Nothing
   here deletes an image: `pelican prune` removes the unused ones.
 - `.github/workflows/bowerbird.yml` runs either or both from the Actions tab, as
-  a dry run unless the box is unticked. It has no schedule yet.
+  a dry run unless the box is unticked. While catalog-sync still runs the
+  artisan sync (23:00 UTC), it also runs daily at 21:30 UTC, always as a dry
+  run, so its log can be checked against what catalog-sync then writes.
 - Slugs come from python-slugify; `docs/slugs.md` explains the map that keeps
   the slugs catalog-sync gave unusual names, and the check to run before
   bowerbird takes over.
@@ -122,7 +124,10 @@ uv run --env-file .env pelican sync --dry-run
   missing or orphaned at once) instead of acting on them.
 - `.github/workflows/pelican.yml` runs one job from the Actions tab, as a dry
   run unless the box is unticked, plus a `database` job that dumps the database
-  to R2. It has no schedule yet.
+  to R2. While catalog-sync still runs these jobs, it also runs each an hour
+  before catalog-sync does, always as a dry run: sync and restore at 00:00 UTC,
+  backup at 01:00, and prune at 23:00 before the 1st and the 15th. The
+  `database` job runs by hand only until catalog-sync's backup is turned off.
 - `docs/backups.md` is the operator guide for the R2 bucket: its locks, the
   trash, and restoring by hand.
 

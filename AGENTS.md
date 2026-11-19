@@ -88,8 +88,10 @@ separate repository).
   per request.
 - Keep requests to other websites polite: one at a time, with a delay between
   pages.
-- Scheduled workflows run without `--dry-run`; manual runs (`workflow_dispatch`)
-  default to a dry run.
+- Manual runs (`workflow_dispatch`) default to a dry run. Scheduled runs write,
+  except bowerbird's and pelican's: while catalog-sync still runs their jobs,
+  they run as dry runs only, ahead of catalog-sync, to compare against it. When
+  a job moves over, drop its schedule check and move it to catalog-sync's time.
 
 ## Revision sources
 

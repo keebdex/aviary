@@ -12,9 +12,12 @@ on:
         description: Log every write and upload without making it
         type: boolean
         default: true
-  # No schedule yet: catalog-sync's artisan-sync still syncs the same rows.
-  # Add one here (daily, as catalog-sync ran at 23:00 UTC) only once that
-  # workflow is gone, so the two never both write.
+  # Scheduled runs are always dry runs, an hour and a half before
+  # catalog-sync's artisan-sync (23:00 UTC), whose run shows what this one
+  # logged it would do. Once that workflow is gone, let scheduled runs write
+  # (drop the schedule check in DRY_RUN) and move this to 23:00.
+  schedule:
+    - cron: '30 21 * * *'
 
 concurrency:
   group: bowerbird
@@ -27,7 +30,7 @@ env:
   CF_IMAGES_API_KEY: ${{ secrets.CF_IMAGES_API_KEY }}
   CF_IMAGES_ACCOUNT_HASH: ${{ secrets.CF_IMAGES_ACCOUNT_HASH }}
   GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
-  DRY_RUN: ${{ inputs.dry-run && '--dry-run' || '' }}
+  DRY_RUN: ${{ (github.event_name == 'schedule' || inputs.dry-run) && '--dry-run' || '' }}
 
 jobs:
   sync:
