@@ -264,7 +264,7 @@ def plan_maker_sync(
                 update[name] = value
         if by_colorway_id is None and "img" not in overridden:
             # matched by name only: resync the identity so later syncs match
-            # by colorway_id again (the old image is left for prune-images)
+            # by colorway_id again (the old image is left for pelican prune)
             update["colorway_id"] = colorway["colorway_id"]
         if update:
             plan.colorway_updates.append((stored["id"], update))

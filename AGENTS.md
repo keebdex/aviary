@@ -36,10 +36,13 @@ separate repository).
     charmap (CJK, `×`, `²`) where they transliterate, so `python-slugify` would
     change 29 of the 3,685 sculpt slugs catalog-sync has made.
   - `ids.py`: `crc32_hex`, the colorway ids catalog-sync made with npm `crc`.
-  - `cf_images.py`: Cloudflare Images (`list_image_ids`, `upload_image`, with
-    catalog-sync's fallbacks: download and send as a file what Cloudflare cannot
-    fetch, downscale what is too large, refuse deleted imgur images). It never
+  - `cf_images.py`: Cloudflare Images (`list_images`, `upload_image` and
+    `upload_file`, with catalog-sync's fallbacks: download and send as a file
+    what Cloudflare cannot fetch, downscale what is too large, refuse deleted
+    imgur images; `download_original`, `delete_image`). Only `pelican prune`
     deletes images.
+  - `r2.py`: `Bucket`, the R2 backup bucket over its S3 API (boto3), and its
+    lock rules through the Cloudflare API.
 - `src/aviary/lorikeet/`: reference color palettes. `ral.py` crawls
   ralcolorchart.com, `sync.py` plans and writes the `colors` rows, `__main__.py`
   is the `lorikeet` command.
@@ -50,6 +53,10 @@ separate repository).
   catalog-sync's `updateMakerDatabase`, `apply.py` the reads and writes,
   `images.py` the colorway image ids and uploads, `__main__.py` the `bowerbird`
   command. See "Artisan sync".
+- `src/aviary/pelican/`: Cloudflare images and their R2 backups, ported from
+  catalog-sync's image jobs. `references.py` (`IMAGE_COLUMNS`, which images the
+  database references), `sync.py`, `maintenance.py` (restore, prune, backup),
+  `__main__.py` the `pelican` command. See "Images and backups".
 - Planned, not yet here: `magpie` (forum crawler writing to the `ingest` schema
   for staff review). Create a module only when its first real code lands.
 
@@ -63,6 +70,8 @@ separate repository).
   they were actually run.
 - `uv run --env-file .env lorikeet ral [--dry-run | --csv PATH]`.
 - `uv run --env-file .env bowerbird gdoc|scrape [--maker ID] [--dry-run]`.
+- `uv run --env-file .env pelican sync|restore|prune|backup [--dry-run]`
+  (`restore --force`, `backup --limit N --force-trash`).
 
 ## Rules for jobs
 
@@ -178,8 +187,8 @@ source: it is JavaScript's `undefined` versus `null`.
   also took a one-letter month or a 1 to 3 digit year.
 - A colorway's `img` is its Cloudflare URL (`artisan/<maker>/<sculpt>/<id>`),
   set before upload; the image keeps that path after a sculpt rename. Images are
-  never deleted here (catalog-sync's `prune-images` removes unused ones), and a
-  failed upload is logged and retried on the next run.
+  never deleted here (`pelican prune` removes unused ones), and a failed upload
+  is logged and retried on the next run.
 - A maker that fails is logged and skipped, and the run still exits 0: a deleted
   or broken doc is routine and must not stop the other makers or the next
   workflow step. Failed makers are listed at the end of the log and in the job
@@ -196,6 +205,61 @@ source: it is JavaScript's `undefined` versus `null`.
   all incoming colorways, not per sculpt. Gaps are harmless: only the relative
   order matters.
 
+## Images and backups
+
+Image columns: `artisan_colorways.img`, `keysets.img` / `order_graph` /
+`order_history`, `keyset_kits.img`, `keyboard_variants.img_front` / `img_back`.
+A Cloudflare image is stored as `<delivery base>/<id>/public` (ids may contain
+slashes); anything else is an external URL, which Keebdex shows as it is.
+`pelican/references.py` lists them in `IMAGE_COLUMNS`: add a column there
+whenever a table starts storing Cloudflare images, or `prune` deletes its
+images.
+
+- `pelican sync` (`image-sync` revision source) uploads external images of
+  published rows (the row and its keyset, keyboard, or sculpt null or Approved)
+  under readable ids ending in a CRC32 of the source URL:
+  `keyset/<profile_keyset_id>/<hash>` (cover), `.../order-graph/<hash>`,
+  `.../order-history/<hash>`, `keyset/<pk>/kit/<id>/<kit_id or slug>/<hash>`,
+  `keyboard/<brand_keyboard_slug>/<release_id>/<variant slug>/<side>/<hash>`,
+  `artisan/<maker>/<sculpt>/<colorway_id>/<hash>` (colorways added in the app;
+  bowerbird uploads its own). The hash gives a replaced image a new id:
+  Cloudflare rejects an existing id, and an id must never change content or the
+  R2 backup keeps the old file. Rows in review keep their original URL. A source
+  answering 404 (or a deleted imgur image) clears the row's image (kits to
+  `''`), except on keyboard variants.
+- `pelican prune` deletes Cloudflare images no row references, counting rows of
+  every review status and image URLs in the `changes` of Pending
+  `edit_suggestions`, and skips images uploaded in the last 7 days (an app
+  upload isn't referenced until its form is saved). Every read must succeed and
+  at least one image must be referenced, or it deletes nothing.
+- `pelican restore` re-uploads, from R2 (`images/<id>`) and under the same id,
+  referenced images Cloudflare no longer has: a record pointing at a pruned
+  image again after an Undo, a Restore, or an approved suggestion. It refuses
+  when Cloudflare lists nothing or more than 10% of referenced images are
+  missing (a bad listing), unless `--force`. Keebdex's revision history relies
+  on this instead of keeping pruned images.
+- `pelican backup` copies every Cloudflare image not yet in R2 to `images/<id>`
+  through the API (`/blob`, with `CF_IMAGES_READ_TOKEN` when set: account tokens
+  get a 403 on the app's UUID-named uploads), then moves backups of images gone
+  from Cloudflare to `trash/images/<id>` once no enabled bucket lock rule
+  covering the key retains them (`Age`, `Date`; any other condition, or a rule
+  with a null prefix, retains). Rules that can't be read count as a lock on
+  everything. It refuses to trash more than 10% of the backups in one run
+  (`--force-trash` lifts it) or anything when Cloudflare lists nothing. A move
+  is copy then delete, so a failure leaves the backup in both places, never in
+  neither.
+- The workflow's `database` job dumps the database (`pg_dump`, custom format) to
+  `db/daily/<date>.dump`, and on the 1st also `db/monthly/<yyyy-mm>.dump`.
+- Retention and protection are set on the bucket, not in code: a lifecycle rule
+  expires `db/daily/` after 30 days, and `images/` is locked indefinitely (so
+  nothing moves to the trash today). Decide how long Keebdex keeps revisions
+  together with any finite lock on `images/`: an image pruned and trashed past
+  it can no longer be restored.
+- `docs/backups.md` walks an operator through the trash (turning it on is
+  infrastructure only) and manual restores; keep it in step with `backup`.
+- Unlike bowerbird, these jobs exit 1 when something failed or looked wrong; a
+  failed prune deletion only logs.
+
 ## Code style
 
 - Python 3.13, typed, formatted and linted by ruff (`pyproject.toml`). Use
@@ -209,5 +273,5 @@ source: it is JavaScript's `undefined` versus `null`.
 Commit messages follow
 [Conventional Commits](https://www.conventionalcommits.org/):
 `<type>(<scope>): <summary>`, imperative and lowercase, no trailing period. The
-scope is the module or area (`lorikeet`, `bowerbird`, `common`, `ci`). Do not
-create commits, branches, or pull requests unless asked.
+scope is the module or area (`lorikeet`, `bowerbird`, `pelican`, `common`,
+`ci`). Do not create commits, branches, or pull requests unless asked.

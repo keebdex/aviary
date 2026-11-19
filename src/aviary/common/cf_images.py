@@ -1,12 +1,12 @@
-"""Cloudflare Images: list the stored ids and upload images under chosen ids.
+"""Cloudflare Images: list, upload under chosen ids, download, and delete.
 
-A port of catalog-sync's utils/image.js (uploadImage, getListImages). Nothing
-here deletes an image: catalog-sync's prune-images removes the ones no row
-references any more.
+A port of catalog-sync's utils/image.js. Only pelican's prune deletes images;
+the syncs never do.
 """
 
 import io
 import logging
+import os
 import re
 from dataclasses import dataclass
 from functools import cache
@@ -57,6 +57,16 @@ class SourceFile:
     content_type: str | None
 
 
+@dataclass(frozen=True)
+class CloudflareImage:
+    id: str
+    uploaded: str  # ISO 8601
+
+
+class ImageNotFound(Exception):
+    """Cloudflare has no image with this id (deleted since it was listed)."""
+
+
 @cache
 def _account() -> tuple[str, str]:
     return require_env("CF_IMAGES_ACCOUNT_ID"), require_env("CF_IMAGES_API_KEY")
@@ -67,19 +77,22 @@ def delivery_base_url() -> str:
     return f"https://imagedelivery.net/{require_env('CF_IMAGES_ACCOUNT_HASH')}"
 
 
-def _api(client: httpx.Client, method: str, path: str, **kwargs) -> httpx.Response:
-    account, token = _account()
+def _api(
+    client: httpx.Client, method: str, path: str, token: str | None = None, **kwargs
+) -> httpx.Response:
+    account, api_key = _account()
     return client.request(
         method,
         API_URL.format(account=account) + path,
-        headers={"Authorization": f"Bearer {token}"},
+        headers={"Authorization": f"Bearer {token or api_key}"},
         **kwargs,
     )
 
 
-def list_image_ids(client: httpx.Client) -> set[str]:
-    """Every image id on the account."""
-    ids: set[str] = set()
+def list_images(client: httpx.Client) -> list[CloudflareImage]:
+    """Every image on the account. Raises on any error: a partial listing
+    would make images look missing (restored) or backups orphaned (trashed)."""
+    images: list[CloudflareImage] = []
     token = None
     while True:
         params = {"per_page": 5000}
@@ -88,10 +101,43 @@ def list_image_ids(client: httpx.Client) -> set[str]:
         response = _api(client, "GET", "/v2", params=params)
         response.raise_for_status()
         result = response.json()["result"]
-        ids.update(image["id"] for image in result["images"])
+        images += [CloudflareImage(i["id"], i["uploaded"]) for i in result["images"]]
         token = result.get("continuation_token")
         if not token:
-            return ids
+            return images
+
+
+def list_image_ids(client: httpx.Client) -> set[str]:
+    """Every image id on the account."""
+    return {image.id for image in list_images(client)}
+
+
+def download_original(client: httpx.Client, image_id: str) -> SourceFile:
+    """The file as uploaded, through the API (a delivery URL would return a
+    resized variant). Account tokens get a 403 for images Cloudflare named
+    itself (Keebdex app uploads), so CF_IMAGES_READ_TOKEN, a user token with
+    Images read access, is used when set."""
+    response = _api(
+        client,
+        "GET",
+        f"/v1/{image_id}/blob",
+        token=os.environ.get("CF_IMAGES_READ_TOKEN") or None,
+    )
+    if response.status_code == 404:
+        raise ImageNotFound(image_id)
+    response.raise_for_status()
+    return SourceFile(response.content, response.headers.get("content-type"))
+
+
+def delete_image(client: httpx.Client, image_id: str) -> bool:
+    """Delete one image; failures are logged and return False."""
+    try:
+        response = _api(client, "DELETE", f"/v1/{image_id}")
+        response.raise_for_status()
+    except httpx.HTTPError as error:
+        log.error("Unable to delete %s: %s", image_id, error)
+        return False
+    return True
 
 
 def _download_headers() -> dict[str, str]:
@@ -145,21 +191,27 @@ def _fit(file: SourceFile) -> SourceFile:
     return SourceFile(buffer.getvalue(), f"image/{output.lower()}")
 
 
-def _upload_file(client: httpx.Client, image_id: str, file: SourceFile) -> UploadResult:
+def upload_file(client: httpx.Client, image_id: str, file: SourceFile) -> UploadResult:
+    """Upload a file under `image_id`, downscaled to Cloudflare's limits if
+    needed. Never raises; failures are logged and returned."""
     fitted = _fit(file)
-    response = _api(
-        client,
-        "POST",
-        "/v1",
-        data={"id": image_id},
-        files={
-            "file": (
-                image_id.rsplit("/", 1)[-1],
-                fitted.data,
-                fitted.content_type or "application/octet-stream",
-            )
-        },
-    )
+    try:
+        response = _api(
+            client,
+            "POST",
+            "/v1",
+            data={"id": image_id},
+            files={
+                "file": (
+                    image_id.rsplit("/", 1)[-1],
+                    fitted.data,
+                    fitted.content_type or "application/octet-stream",
+                )
+            },
+        )
+    except httpx.HTTPError as error:
+        log.error("Unable to upload %s: %s", image_id, error)
+        return UploadResult(False, None, str(error))
     if response.is_success:
         return UploadResult(True)
     log.error(
@@ -172,7 +224,7 @@ def _upload_downloaded(client: httpx.Client, image_id: str, url: str) -> UploadR
     file = _fetch(client, url)
     if isinstance(file, UploadResult):
         return file
-    return _upload_file(client, image_id, file)
+    return upload_file(client, image_id, file)
 
 
 def upload_image(client: httpx.Client, image_id: str, url: str) -> UploadResult:

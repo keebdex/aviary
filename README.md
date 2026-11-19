@@ -7,11 +7,12 @@ bird:
 | ----------- | ---------------------------------------------- | ------- |
 | `lorikeet`  | Adds reference color palettes (RAL) to Keebdex | Ready   |
 | `bowerbird` | Syncs artisan catalogs from makers and Docs    | Porting |
+| `pelican`   | Keeps Keebdex's images on Cloudflare and in R2 | Porting |
 | `magpie`    | Crawls forum interest checks and group buys    | Planned |
 
-`magpie` and `bowerbird` take over from
-[catalog-sync](https://github.com/keebdex/catalog-sync), which is ported here
-step by step.
+`bowerbird` and `pelican` take over the artisan sync and the image jobs from
+[catalog-sync](https://github.com/keebdex/catalog-sync), which keeps only its
+vendor keyset scraper until `magpie` replaces it.
 
 ## Setup
 
@@ -94,11 +95,35 @@ uv run --env-file .env bowerbird scrape --dry-run
   docs are all gone has its sync disabled. A maker that fails is logged and
   skipped, and the run still succeeds.
 - Colorway images are uploaded to Cloudflare Images under fixed ids. Nothing
-  here deletes an image: catalog-sync's `prune-images` removes the unused ones.
+  here deletes an image: `pelican prune` removes the unused ones.
 - `.github/workflows/bowerbird.yml` runs either or both from the Actions tab, as
   a dry run unless the box is unticked. It has no schedule yet.
 - `docs/slug-migration.md` lists the slugs a slug library would change, to
   migrate before ever replacing `common/slug.py`.
+
+## pelican
+
+Keeps Keebdex's images on Cloudflare Images and backed up in Cloudflare R2: a
+port of catalog-sync's image jobs, which still run in production. Run pelican
+only as a dry run until catalog-sync's `image-sync`, `image-prune`, and `backup`
+workflows stop.
+
+```bash
+uv run --env-file .env pelican sync --dry-run
+```
+
+- `sync` uploads the external images of published records to Cloudflare and
+  points the records at them; `restore` re-uploads, from R2, referenced images
+  Cloudflare no longer has; `prune` deletes images nothing references (a week
+  old at least); `backup` copies new images to R2 and moves backups of deleted
+  images to the trash once the bucket's lock rules allow.
+- Each refuses numbers that look like a bad read (nothing listed, too many
+  missing or orphaned at once) instead of acting on them.
+- `.github/workflows/pelican.yml` runs one job from the Actions tab, as a dry
+  run unless the box is unticked, plus a `database` job that dumps the database
+  to R2. It has no schedule yet.
+- `docs/backups.md` is the operator guide for the R2 bucket: its locks, the
+  trash, and restoring by hand.
 
 ## License
 
