@@ -65,8 +65,8 @@ separate repository).
 
 - `uv sync`: install. `uv run pre-commit install` once per clone (ruff and the
   Conventional Commits check on commit messages).
-- `uv run ruff check .` and `uv run ruff format .`: lint and format. CI runs
-  both (`.github/workflows/ci.yml`).
+- `uv run ruff check .` and `uv run ruff format .`: lint and format. CI
+  (`owl`, `.github/workflows/owl.yml`) runs both.
 - `uv run pytest`: tests (CI runs them too). Do not claim tests passed unless
   they were actually run.
 - `uv run --env-file .env lorikeet ral [--dry-run | --csv PATH]`.
