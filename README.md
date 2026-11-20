@@ -97,7 +97,8 @@ uv run --env-file .env bowerbird scrape --dry-run
 - Colorway images are uploaded to Cloudflare Images under fixed ids. Nothing
   here deletes an image: `pelican prune` removes the unused ones.
 - `.github/workflows/bowerbird.yml` runs either or both from the Actions tab, as
-  a dry run unless the box is unticked. While catalog-sync still runs the
+  a dry run unless the box is unticked, and lists in the run's summary what
+  each maker's sync changed (or would change). While catalog-sync still runs the
   artisan sync (23:00 UTC), it also runs daily at 21:30 UTC, always as a dry
   run, so its log can be checked against what catalog-sync then writes.
 - Slugs come from python-slugify; `docs/slugs.md` explains the map that keeps

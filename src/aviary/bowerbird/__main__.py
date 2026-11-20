@@ -5,15 +5,16 @@
 
 A maker that fails (a broken doc, a site down, a database error) is logged and
 skipped, and the run still exits 0, as catalog-sync's does: a deleted or broken
-doc is routine and must not hold up the other makers. The failed makers are
-listed at the end of the log and in the job summary.
+doc is routine and must not hold up the other makers. The job summary lists
+what each maker's sync changed (or, in a dry run, would change) and the makers
+that failed.
 """
 
 import argparse
 import logging
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from supabase import Client
@@ -36,6 +37,64 @@ log = logging.getLogger("bowerbird")
 # The `source` of the rows each command owns, which is also the revision
 # source Keebdex shows their changes under.
 SCRAPER_SOURCE = "scraper"
+
+# Summary columns: plan_counts keys, then the images uploaded.
+COLUMNS = (
+    ("sculpts_new", "Sculpts new"),
+    ("sculpts_updated", "Sculpts updated"),
+    ("sculpts_removed", "Sculpts removed"),
+    ("colorways_new", "Colorways new"),
+    ("colorways_updated", "Colorways updated"),
+    ("colorways_removed", "Colorways removed"),
+    ("images", "Images"),
+)
+
+
+@dataclass
+class Outcome:
+    """What a run did, maker by maker, for the job summary."""
+
+    changed: dict[str, dict[str, int]] = field(default_factory=dict)
+    unchanged: int = 0
+    failed: list[str] = field(default_factory=list)
+    disabled: list[str] = field(default_factory=list)
+
+    def record(self, maker_id: str, counts: dict[str, int]) -> None:
+        if any(counts.values()):
+            self.changed[maker_id] = counts
+        else:
+            self.unchanged += 1
+
+
+def summary(command: str, outcome: Outcome, *, dry_run: bool) -> str:
+    """The job summary: a row per maker with changes, a total, and the makers
+    that failed or were disabled."""
+    note = " (dry run: nothing written)" if dry_run else ""
+    lines = [f"## bowerbird {command}{note}", ""]
+    if outcome.changed:
+        lines += [
+            "| Maker | " + " | ".join(label for _, label in COLUMNS) + " |",
+            "| --- |" + " ---: |" * len(COLUMNS),
+        ]
+        for maker_id, counts in sorted(outcome.changed.items()):
+            cells = " | ".join(str(counts.get(key, 0)) for key, _ in COLUMNS)
+            lines.append(f"| `{maker_id}` | {cells} |")
+        totals = " | ".join(
+            f"**{sum(c.get(key, 0) for c in outcome.changed.values())}**"
+            for key, _ in COLUMNS
+        )
+        lines += [f"| **Total** | {totals} |", ""]
+    lines.append(f"Makers with no changes: {outcome.unchanged}")
+    if outcome.disabled:
+        lines.append(
+            "\nDisabled (every doc gone): "
+            + ", ".join(f"`{m}`" for m in outcome.disabled)
+        )
+    if outcome.failed:
+        lines.append(
+            "\nFailed and skipped: " + ", ".join(f"`{m}`" for m in outcome.failed)
+        )
+    return "\n".join(lines)
 
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -78,7 +137,7 @@ class Run:
         *,
         preserve_missing: bool,
         available_document_ids: Sequence[str] = (),
-    ) -> SyncPlan:
+    ) -> tuple[SyncPlan, dict[str, int]]:
         stored_sculpts, stored_colorways, other_sculpts = fetch_stored(
             self.client, maker_id, source
         )
@@ -91,13 +150,13 @@ class Run:
             available_document_ids=set(available_document_ids),
             other_sculpts=other_sculpts,
         )
-        apply_plan(self.client, plan, dry_run=self.dry_run)
-        return plan
+        counts = apply_plan(self.client, plan, dry_run=self.dry_run)
+        return plan, counts
 
-    def upload_images(self, plan: SyncPlan) -> None:
+    def upload_images(self, plan: SyncPlan) -> int:
         # Failed uploads are logged and retried on the next run (their ids
         # are still missing); a dead source image must not fail the maker.
-        images.upload_missing(
+        return images.upload_missing(
             self.http,
             plan.colorways,
             self.existing_ids,
@@ -119,8 +178,8 @@ def start(source: str, dry_run: bool) -> Run:
     )
 
 
-def sync_websites(run: Run, maker_ids: list[str]) -> list[str]:
-    failed = []
+def sync_websites(run: Run, maker_ids: list[str]) -> Outcome:
+    outcome = Outcome()
     for maker_id in maker_ids:
         log.info("Scraping %s", maker_id)
         try:
@@ -134,17 +193,17 @@ def sync_websites(run: Run, maker_ids: list[str]) -> list[str]:
                 }
                 for table in SCRAPERS[maker_id](run.http)
             ]
-            plan = run.sync(
+            plan, counts = run.sync(
                 maker_id,
                 tables,
                 SCRAPER_SOURCE,
                 preserve_missing=maker_id in PARTIAL_MAKERS,
             )
-            run.upload_images(plan)
+            outcome.record(maker_id, counts | {"images": run.upload_images(plan)})
         except Exception:
             log.exception("Maker %s failed", maker_id)
-            failed.append(maker_id)
-    return failed
+            outcome.failed.append(maker_id)
+    return outcome
 
 
 def disable(run: Run, maker_id: str) -> None:
@@ -159,12 +218,12 @@ def disable(run: Run, maker_id: str) -> None:
     )
 
 
-def sync_documents(run: Run, maker_ids: list[str] | None) -> list[str]:
+def sync_documents(run: Run, maker_ids: list[str] | None) -> Outcome:
     google = Google(run.http)
     # one set of regexes for the whole run: their state carries over between
     # makers, as catalog-sync's module-level ones do
     rx = Regexes()
-    failed = []
+    outcome = Outcome()
     for maker in importer.fetch_makers(run.client, maker_ids):
         maker_id = maker["maker_id"]
         log.info("Syncing %s from %d doc(s)", maker_id, len(maker["document_ids"]))
@@ -174,8 +233,9 @@ def sync_documents(run: Run, maker_ids: list[str] | None) -> list[str]:
             )
             if tables is None:
                 disable(run, maker_id)
+                outcome.disabled.append(maker_id)
                 continue
-            plan = run.sync(
+            plan, counts = run.sync(
                 maker_id,
                 tables,
                 importer.SOURCE,
@@ -192,13 +252,14 @@ def sync_documents(run: Run, maker_ids: list[str] | None) -> list[str]:
                     {"contributors": contributors, "updated_at": modified_time},
                     dry_run=run.dry_run,
                 )
-            run.upload_images(plan)
+            outcome.record(maker_id, counts | {"images": run.upload_images(plan)})
         except DocNotFound:
             disable(run, maker_id)
+            outcome.disabled.append(maker_id)
         except Exception:
             log.exception("Maker %s failed", maker_id)
-            failed.append(maker_id)
-    return failed
+            outcome.failed.append(maker_id)
+    return outcome
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -210,21 +271,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         # start() already used the client, so it can't be entered with `with`
         try:
             if args.command == "gdoc":
-                failed = sync_documents(run, args.maker)
+                outcome = sync_documents(run, args.maker)
             else:
-                failed = sync_websites(run, args.maker or sorted(SCRAPERS))
+                outcome = sync_websites(run, args.maker or sorted(SCRAPERS))
         finally:
             run.http.close()
     except MissingSettingError as error:
         log.error("%s; see .env.example", error)
         return 1
 
-    if failed:
-        log.error("Makers that failed and were skipped: %s", ", ".join(failed))
-        write_summary(
-            f"## bowerbird {args.command}\n\nFailed and skipped: "
-            + ", ".join(f"`{m}`" for m in failed)
-        )
+    if outcome.failed:
+        log.error("Makers that failed and were skipped: %s", ", ".join(outcome.failed))
+    write_summary(summary(args.command, outcome, dry_run=args.dry_run))
     return 0
 
 

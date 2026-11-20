@@ -49,10 +49,11 @@ def upload_missing(
     base_url: str,
     *,
     dry_run: bool,
-) -> None:
+) -> int:
     """Upload, a few at a time, the source image of every colorway whose id
     Cloudflare lacks, skipping images locked in the app. Failures are logged;
-    their ids stay missing, so the next run retries them."""
+    their ids stay missing, so the next run retries them. Returns how many were
+    uploaded (in a dry run, how many would be)."""
     pending = {
         image: c["remote_img"]
         for c in colorways
@@ -60,10 +61,10 @@ def upload_missing(
         if (image := image_id(c, base_url)) not in existing_ids
     }
     if not pending:
-        return
+        return 0
     if dry_run:
         log.info("[DRY RUN] Would upload %d images", len(pending))
-        return
+        return len(pending)
 
     uploaded: set[str] = set()
 
@@ -76,3 +77,4 @@ def upload_missing(
     run_each(pending, upload)
     existing_ids |= uploaded
     log.info("Images uploaded: %d of %d", len(uploaded), len(pending))
+    return len(uploaded)

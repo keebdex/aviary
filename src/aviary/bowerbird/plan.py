@@ -275,3 +275,15 @@ def plan_maker_sync(
     ]
     plan.colorways = incoming
     return plan
+
+
+def plan_counts(plan: SyncPlan) -> dict[str, int]:
+    """How many rows the plan adds, changes, and removes, per table."""
+    return {
+        "sculpts_new": len(plan.sculpt_inserts),
+        "sculpts_updated": len(plan.sculpt_updates),
+        "sculpts_removed": len(plan.removed_sculpts),
+        "colorways_new": len(plan.colorway_inserts),
+        "colorways_updated": len(plan.colorway_updates),
+        "colorways_removed": len(plan.removed_colorway_ids),
+    }
