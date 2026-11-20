@@ -21,6 +21,7 @@ dependencies = [
 [project.scripts]
 bowerbird = "aviary.bowerbird.__main__:main"
 lorikeet = "aviary.lorikeet.__main__:main"
+magpie = "aviary.magpie.__main__:main"
 pelican = "aviary.pelican.__main__:main"
 
 [build-system]

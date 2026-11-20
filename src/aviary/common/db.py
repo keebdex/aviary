@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
+from postgrest import SyncPostgrestClient
 from supabase import Client, ClientOptions, create_client
 
 from aviary.common.config import require_env
@@ -43,16 +44,19 @@ def create_supabase(source: str | None = None) -> Client:
 
 
 def fetch_all(
-    client: Client,
+    client: Client | SyncPostgrestClient,
     table: str,
     columns: str = "*",
     where: Callable = lambda query: query,
+    order: str = "id",
 ) -> list[Row]:
-    """Every row matching `where`, in pages ordered by id. Raises on any error
-    (supabase-py does): a partial read must never look like "nothing there"."""
+    """Every row matching `where`, in pages ordered by `order` (a column whose
+    values are unique among those rows). `client` may also be a schema's
+    client (`client.schema("ingest")`). Raises on any error (supabase-py
+    does): a partial read must never look like "nothing there"."""
     rows: list[Row] = []
     while True:
-        query = where(client.table(table).select(columns)).order("id")
+        query = where(client.table(table).select(columns)).order(order)
         data = query.range(len(rows), len(rows) + PAGE_SIZE - 1).execute().data
         rows += data
         if len(data) < PAGE_SIZE:
