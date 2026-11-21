@@ -60,6 +60,9 @@ class Fetcher:
     def get(self, url: str) -> str:
         if not self._allowed(url):
             raise FetchError(f"blocked by robots.txt: {url}")
+        return self._with_retries(url)
+
+    def _with_retries(self, url: str) -> str:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 return self._request(url)
@@ -72,13 +75,22 @@ class Fetcher:
         raise AssertionError("unreachable")
 
     def _allowed(self, url: str) -> bool:
+        """RFC 9309: a robots.txt the site answers 4xx for means no rules;
+        one unreachable after retries (5xx, 429, network) means full
+        disallow, so it raises and the run reads nothing. Not cached then:
+        the next request asks again."""
         if self._robots is None:
             robots = RobotFileParser()
             try:
-                robots.parse(self._request(f"{BASE_URL}/robots.txt").splitlines())
-            except FetchError:
-                log.warning("robots.txt unavailable; assuming no restrictions")
-                robots.parse([])
+                text = self._with_retries(f"{BASE_URL}/robots.txt")
+            except _Retryable as error:
+                raise FetchError(
+                    f"robots.txt unreachable, not crawling: {error}", error.status
+                ) from error
+            except FetchError as error:
+                log.warning("robots.txt unavailable (%s); no restrictions", error)
+                text = ""
+            robots.parse(text.splitlines())
             self._robots = robots
         return self._robots.can_fetch(USER_AGENT, url)
 

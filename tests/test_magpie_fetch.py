@@ -67,6 +67,39 @@ def test_robots_txt_is_respected():
         fetcher(handler).get(TOPIC)
 
 
+def robots_site(robots_responses):
+    """robots.txt answers `robots_responses` in turn; pages answer 200."""
+    robots_calls = []
+
+    def handler(request):
+        if request.url.path == "/robots.txt":
+            robots_calls.append(request)
+            return robots_responses[len(robots_calls) - 1]
+        return httpx.Response(200, text="page")
+
+    return handler, robots_calls
+
+
+def test_a_missing_robots_txt_means_no_rules():
+    handler, _ = robots_site([httpx.Response(404)])
+    assert fetcher(handler).get(TOPIC) == "page"
+
+
+def test_a_robots_txt_server_error_is_retried():
+    handler, robots_calls = robots_site(
+        [httpx.Response(503), httpx.Response(200, text=ROBOTS)]
+    )
+    assert fetcher(handler).get(TOPIC) == "page"
+    assert len(robots_calls) == 2
+
+
+def test_an_unreachable_robots_txt_fetches_nothing():
+    handler, robots_calls = robots_site([httpx.Response(503)] * MAX_ATTEMPTS)
+    with pytest.raises(FetchError, match=r"robots\.txt unreachable"):
+        fetcher(handler).get(TOPIC)
+    assert len(robots_calls) == MAX_ATTEMPTS
+
+
 def test_requests_wait_for_the_delay():
     sleeps = []
     handler, _ = site([httpx.Response(200), httpx.Response(200)])

@@ -111,6 +111,14 @@ def test_a_gone_thread_is_fetched_again_only_after_new_activity():
     assert plan_listing(listing, {"1": gone}, NOW).due[0]["gone_at"] is None
 
 
+def test_new_activity_restarts_the_retries_of_a_thread_that_gave_up():
+    # whatever its stored fetch_attempts, the due row resets them
+    listing = BoardListing("gb", None)
+    listing.add_page(page(summary(1, at(14))))
+    (due,) = plan_listing(listing, {"1": stored("2026-11-12T00:00:00+00:00")}, NOW).due
+    assert (due["fetch_attempts"], due["fetch_error"]) == (0, None)
+
+
 # fetch schedule
 
 

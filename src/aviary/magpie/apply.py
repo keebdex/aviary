@@ -11,12 +11,12 @@ import logging
 from datetime import datetime, timedelta
 from itertools import batched
 
-from postgrest import SyncPostgrestClient
+from postgrest import APIError, SyncPostgrestClient
 from supabase import Client
 
 from aviary.common.db import PUBLISHED_FILTER, Row, fetch_all
 from aviary.magpie.geekhack import FORUM
-from aviary.magpie.plan import ListingPlan, PromotionPlan, stored_time
+from aviary.magpie.plan import ListingPlan, Promotion, PromotionPlan, stored_time
 from aviary.magpie.proposal import MODULE, keyset_row, kit_rows
 
 log = logging.getLogger(__name__)
@@ -34,6 +34,7 @@ UPSERT_CHUNK_SIZE = 500
 # A run still `running` after this long crashed; the next run marks it failed
 # so the one-running-run index lets it start.
 STALE_RUN = timedelta(hours=1)
+UNIQUE_VIOLATION = "23505"
 
 
 class RunningError(RuntimeError):
@@ -102,7 +103,14 @@ def start_run(client: Client, max_pages: int, now: datetime) -> int:
     if running:
         raise RunningError(f"crawl run {running[0]['id']} is still running")
     row = {"source": FORUM, "status": "running", "max_pages": max_pages}
-    return ingest(client).table(RUNS).insert(row).execute().data[0]["id"]
+    try:
+        return ingest(client).table(RUNS).insert(row).execute().data[0]["id"]
+    except APIError as error:
+        # another run (a local one, outside the Actions concurrency group)
+        # started between the check and the insert: crawl_runs_one_running_idx
+        if error.code == UNIQUE_VIOLATION:
+            raise RunningError("another crawl run just started") from error
+        raise
 
 
 def finish_run(client: Client, run_id: int, values: Row) -> None:
@@ -212,12 +220,21 @@ def fetch_waiting(client: Client) -> list[Row]:
     )
 
 
+class _Triaged(Exception):
+    """The candidate is no longer waiting: staff triaged it meanwhile."""
+
+
 def apply_promotions(client: Client, plan: PromotionPlan, dry_run: bool) -> list[int]:
     """Insert each promotion (keyset, then its kits) and mark its candidate
     promoted, then set the match_key of rematched candidates; the topics
-    whose promotion failed. A keyset whose kits fail is deleted again
-    (nothing points at it yet): without kits the review queue would never
-    show it."""
+    whose promotion failed.
+
+    A promotion that cannot complete is rolled back (nothing points at the
+    new keyset yet): kits that fail would leave a keyset the review queue
+    never shows, and a candidate staff triaged after `fetch_waiting` read it
+    would leave an orphan, or a duplicate of what staff made of it. A
+    triaged candidate is skipped, not failed. A rollback that fails is
+    logged and the run goes on to the other promotions."""
     failed: list[int] = []
     failed_keys: set[str] = set()
     for promotion in plan.promotions:
@@ -245,24 +262,48 @@ def apply_promotions(client: Client, plan: PromotionPlan, dry_run: bool) -> list
             continue
         try:
             client.table(KITS).insert(kit_rows(payload)).execute()
+            # only while still waiting: staff may have triaged it meanwhile
+            claimed = (
+                ingest(client)
+                .table(CANDIDATES)
+                .update(
+                    {
+                        "state": "promoted",
+                        "promoted_kind": "keyset",
+                        "promoted_id": keyset_id,
+                    }
+                )
+                .eq("id", promotion.candidate_id)
+                .eq("state", "new")
+                .execute()
+                .data
+            )
+            if not claimed:
+                raise _Triaged
+        except _Triaged:
+            log.warning(
+                "Topic %d: candidate %d was triaged meanwhile, removing keyset %s",
+                promotion.topic_id,
+                promotion.candidate_id,
+                promotion.key,
+            )
+            failed_keys.add(promotion.key)
+            if not _remove_keyset(client, promotion, keyset_id):
+                failed.append(promotion.topic_id)
         except Exception:
             log.exception(
-                "Topic %d: inserting the kits of %s failed, removing the keyset",
+                "Topic %d: promoting %s failed, removing the keyset",
                 promotion.topic_id,
                 promotion.key,
             )
-            client.table(KEYSETS).delete().eq("id", keyset_id).execute()
+            _remove_keyset(client, promotion, keyset_id)
             failed.append(promotion.topic_id)
             failed_keys.add(promotion.key)
-            continue
-        # only while still waiting: staff may have triaged it meanwhile
-        ingest(client).table(CANDIDATES).update(
-            {"state": "promoted", "promoted_kind": "keyset", "promoted_id": keyset_id}
-        ).eq("id", promotion.candidate_id).eq("state", "new").execute()
 
     for rematch in plan.rematches:
         if rematch.key in failed_keys:
-            # its keyset was not inserted: the candidate waits for next run
+            # its keyset was not inserted (or was removed again): the
+            # candidate waits for the next run
             continue
         if dry_run:
             log.info(
@@ -275,3 +316,21 @@ def apply_promotions(client: Client, plan: PromotionPlan, dry_run: bool) -> list
             "id", rematch.candidate_id
         ).eq("state", "new").execute()
     return failed
+
+
+def _remove_keyset(client: Client, promotion: Promotion, keyset_id: int) -> bool:
+    """Delete a keyset this run just inserted, kits first; False (logged)
+    when that fails, so the caller lists the topic as failed and the run
+    goes on. The kits are found by key: the keyset did not exist before."""
+    try:
+        client.table(KITS).delete().eq("profile_keyset_id", promotion.key).execute()
+        client.table(KEYSETS).delete().eq("id", keyset_id).execute()
+    except Exception:
+        log.exception(
+            "Topic %d: removing keyset %s (id %d) failed; delete it by hand",
+            promotion.topic_id,
+            promotion.key,
+            keyset_id,
+        )
+        return False
+    return True

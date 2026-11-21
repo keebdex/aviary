@@ -111,7 +111,17 @@ def plan_listing(
             # topic it then refuses to show)
             plan.seen.append(row)
             continue
-        plan.due.append({**row, "next_fetch_at": now.isoformat(), "gone_at": None})
+        # new activity starts the retries over: a thread that ran out of
+        # attempts gets the full backoff again, not a single try
+        plan.due.append(
+            {
+                **row,
+                "next_fetch_at": now.isoformat(),
+                "gone_at": None,
+                "fetch_attempts": 0,
+                "fetch_error": None,
+            }
+        )
     return plan
 
 

@@ -25,7 +25,8 @@ separate repository).
   - `config.py`: `require_env(name)` for settings.
   - `db.py`: `create_supabase(source=None)`, the only way to create a Supabase
     client (see "Revision sources"); `fetch_all(client, table, columns, where,
-    order)` for every paged read (also on `client.schema("ingest")`); `PUBLISHED_FILTER` (Keebdex's published rule); `Row`.
+    order)` for every paged read (also on `client.schema("ingest")`);
+    `PUBLISHED_FILTER` (Keebdex's published rule); `Row`.
   - `pool.py`: `run_each(items, work)`, network work a few at a time
     (`CONCURRENCY`), counting failures.
   - `http.py`: `create_http_client()` for reading websites.
@@ -263,8 +264,9 @@ topic, and staff review the result in Keebdex instead.
   and its hash (`changed_at` when it changes), then schedules the next fetch:
   weekly while the thread is under 90 days old (edits don't bump a thread),
   else on new activity only. A failure backs off from an hour, doubling, and
-  stops after 5 in a row; a 404 sets `gone_at`. Failures are routine and the
-  run still succeeds.
+  stops after 5 in a row until new activity starts the count over; a 404 sets
+  `gone_at`. Failures are routine and the run still succeeds. robots.txt is
+  retried like a page: a 4xx means no rules, unreachable fails the run.
 - Each fetched keyset thread (by title, `classify.py`) gets a candidate:
   `payload` shaped like the keyset submission (`keyset` columns, `kits`),
   `confidence` per field, `match_key` when Keebdex has the keyset. The
@@ -285,10 +287,13 @@ topic, and staff review the result in Keebdex instead.
   `--max-age-days` and is neither ignored nor gone: the keyset and its kits
   `Pending` with a null `submitted_by`, like catalog-sync's vendor keysets,
   then the candidate `promoted` (`promoted_kind` keyset). Keebdex's keyset
-  queue lists kits, so when the kits fail the keyset just inserted is deleted
-  again. A candidate whose keyset Keebdex has now (its topic's URL in any
-  `topic=` form, or its key, of any source or review status, or a keyset this
-  run inserts) gets that `match_key` and waits for staff as an edit; keysets
+  queue lists kits, so when the kits fail, or staff triaged the candidate
+  meanwhile (the update finds it no longer `new`), the keyset just inserted
+  and its kits are deleted again; a failed delete is logged with the id for
+  removal by hand and the run goes on. A candidate whose keyset Keebdex has
+  now (its topic's URL in any `topic=` form, or its key, of any source or
+  review status, or a keyset this run inserts) gets that `match_key` and
+  waits for staff as an edit; keysets
   are never updated, a different status is only reported. Everything else
   waits for staff.
 - An empty read of keysets or profiles writes nothing; a failed promotion

@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 
 import pytest
+from postgrest import APIError
 
 from aviary.magpie import __main__ as magpie
 from aviary.magpie import apply
@@ -143,6 +144,43 @@ def test_another_running_run_stops_the_crawl(crawl_env, monkeypatch):
     assert written["listing"] == []
 
 
+class RacedRuns:
+    """crawl_runs where nothing is running at the check, but another run
+    inserts before this one does."""
+
+    def table(self, name):
+        return self
+
+    def schema(self, name):
+        return self
+
+    def update(self, values):
+        return self
+
+    def select(self, columns):
+        return self
+
+    def eq(self, column, value):
+        return self
+
+    def lt(self, column, value):
+        return self
+
+    def insert(self, row):
+        self.inserting = True
+        return self
+
+    def execute(self):
+        if getattr(self, "inserting", False):
+            raise APIError({"code": "23505", "message": "one_running_idx"})
+        return type("Response", (), {"data": []})
+
+
+def test_a_run_started_between_check_and_insert_is_a_running_error():
+    with pytest.raises(apply.RunningError):
+        apply.start_run(RacedRuns(), 5, datetime(2026, 11, 21, tzinfo=UTC))
+
+
 class Fetches:
     def __init__(self, result):
         self.result = result
@@ -263,8 +301,8 @@ class Table:
         return self
 
     def execute(self):
-        if self.name in self.db.failing:
-            raise RuntimeError(f"{self.name} refused")
+        if {self.name, (self.name, self.op)} & self.db.failing:
+            raise RuntimeError(f"{self.name} {self.op} refused")
         table = self.db.rows[self.name]
         hit = [r for r in table if all(r.get(c) == v for c, v in self.filters)]
         if self.op == "delete":
@@ -325,13 +363,39 @@ def test_promotion_inserts_and_marks_the_candidate():
 
 
 def test_a_keyset_whose_kits_fail_is_removed_and_its_candidates_wait():
-    client = FakeClient(waiting(1, 2), failing={"keyset_kits"})
+    client = FakeClient(waiting(1, 2), failing={("keyset_kits", "insert")})
     plan = PromotionPlan(
         promotions=[Promotion(1, 200, payload("a"))],
         rematches=[Rematch(2, 100, "gmk/a")],
     )
     assert apply.apply_promotions(client, plan, dry_run=False) == [200]
     assert client.rows["keysets"] == []
+    assert client.rows["candidates"] == waiting(1, 2)
+
+
+def test_a_candidate_triaged_meanwhile_rolls_its_keyset_back():
+    # staff dismissed candidate 1 after fetch_waiting read it
+    client = FakeClient([{"id": 1, "state": "dismissed"}, *waiting(2)])
+    plan = PromotionPlan(
+        promotions=[Promotion(1, 200, payload("a"))],
+        rematches=[Rematch(2, 100, "gmk/a")],
+    )
+    assert apply.apply_promotions(client, plan, dry_run=False) == []
+    assert client.rows["keysets"] == []
+    assert client.rows["keyset_kits"] == []
+    assert client.rows["candidates"] == [{"id": 1, "state": "dismissed"}, *waiting(2)]
+
+
+def test_a_failed_rollback_is_reported_and_the_run_goes_on():
+    client = FakeClient(
+        waiting(1, 2), failing={("keyset_kits", "insert"), ("keysets", "delete")}
+    )
+    plan = PromotionPlan(
+        promotions=[Promotion(1, 200, payload("a")), Promotion(2, 300, payload("b"))]
+    )
+    assert apply.apply_promotions(client, plan, dry_run=False) == [200, 300]
+    # both promotions were tried; their keysets are left for staff to remove
+    assert [k["slug"] for k in client.rows["keysets"]] == ["a", "b"]
     assert client.rows["candidates"] == waiting(1, 2)
 
 
