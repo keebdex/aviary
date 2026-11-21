@@ -51,7 +51,7 @@ class Fetcher:
         self._delay = delay
         self._backoff = backoff
         self._sleep = sleep
-        self._last_request = 0.0
+        self._last_request: float | None = None
         self._robots: RobotFileParser | None = None
 
     def close(self) -> None:
@@ -83,9 +83,12 @@ class Fetcher:
         return self._robots.can_fetch(USER_AGENT, url)
 
     def _request(self, url: str) -> str:
-        wait = self._delay - (time.monotonic() - self._last_request)
-        if wait > 0:
-            self._sleep(wait)
+        # monotonic() counts from boot, so the first request must not compare
+        # against 0: on a machine up for less than the delay it would wait.
+        if self._last_request is not None:
+            wait = self._delay - (time.monotonic() - self._last_request)
+            if wait > 0:
+                self._sleep(wait)
         self._last_request = time.monotonic()
         try:
             response = self._client.get(url)

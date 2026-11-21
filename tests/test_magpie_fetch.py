@@ -80,3 +80,17 @@ def test_requests_wait_for_the_delay():
     # robots.txt went first; both pages waited for the one before
     assert len(sleeps) == 2
     assert all(s > 59 for s in sleeps)
+
+
+def test_first_request_does_not_wait_on_a_fresh_machine(monkeypatch):
+    """monotonic() counts from boot: a CI runner may be up for under a minute."""
+    monkeypatch.setattr("aviary.magpie.fetch.time.monotonic", lambda: 5.0)
+    sleeps = []
+    handler, _ = site([httpx.Response(200)])
+    Fetcher(
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        delay=60,
+        sleep=sleeps.append,
+    ).get(TOPIC)
+    # robots.txt went first without waiting; only the page waited for it
+    assert sleeps == [60.0]
