@@ -13,7 +13,7 @@ from itertools import batched
 
 from supabase import Client
 
-from aviary.bowerbird.plan import SyncPlan, maker_sculpt_id
+from aviary.bowerbird.plan import SyncPlan, maker_sculpt_id, plan_counts
 from aviary.common.db import Row, fetch_all
 
 log = logging.getLogger(__name__)
@@ -53,6 +53,8 @@ class Writer:
         self.dry_run = dry_run
 
     def insert(self, table: str, rows: Sequence[Row]) -> None:
+        if not rows:
+            return
         if self.dry_run:
             log.info(
                 "[DRY RUN] Would insert %d rows into %s: %s",
@@ -142,13 +144,14 @@ def _remove_sculpts(
     sculpts: list[Row],
     deleted_ids: set[int],
     soft_ids: set[int],
-) -> None:
+) -> int:
     """A sculpt gone from the source still holds colorways of other sources
     (added in the Keebdex app) and soft-deleted ones, which point at it. Delete
     it only when no colorway is left, soft-delete it when only deleted ones
-    are, and keep it while colorways of other sources are."""
+    are, and keep it while colorways of other sources are. Returns how many
+    were deleted or soft-deleted."""
     if not sculpts:
-        return
+        return 0
     keys = [maker_sculpt_id(s) for s in sculpts]
     remaining: dict[str, list[Row]] = defaultdict(list)
     for row in _select_in(
@@ -178,22 +181,29 @@ def _remove_sculpts(
         )
     if kept:
         log.info("Sculpts kept for colorways of other sources: %s", kept)
+    return len(to_delete) + len(to_soft_delete)
 
 
-def apply_plan(client: Client, plan: SyncPlan, *, dry_run: bool) -> None:
+def apply_plan(client: Client, plan: SyncPlan, *, dry_run: bool) -> dict[str, int]:
     """Write in catalog-sync's order: sculpts first (colorways point at them),
-    then colorways, then the removals."""
+    then colorways, then the removals. Returns `plan_counts`, with the sculpts
+    actually removed (not those kept for other sources' colorways)."""
     writer = Writer(client, dry_run)
     writer.insert(SCULPTS, plan.sculpt_inserts)
     writer.update(SCULPTS, plan.sculpt_updates)
     writer.insert(COLORWAYS, plan.colorway_inserts)
     writer.update(COLORWAYS, plan.colorway_updates)
     deleted, soft = _remove_colorways(client, writer, plan.removed_colorway_ids)
-    _remove_sculpts(client, writer, plan.removed_sculpts, deleted, soft)
-    log.info(
-        "Sculpts: %d new, %d updated. Colorways: %d new, %d updated.",
-        len(plan.sculpt_inserts),
-        len(plan.sculpt_updates),
-        len(plan.colorway_inserts),
-        len(plan.colorway_updates),
+    counts = plan_counts(plan)
+    counts["sculpts_removed"] = _remove_sculpts(
+        client, writer, plan.removed_sculpts, deleted, soft
     )
+    if any(counts.values()):
+        log.info(
+            "Sculpts: %d new, %d updated. Colorways: %d new, %d updated.",
+            len(plan.sculpt_inserts),
+            len(plan.sculpt_updates),
+            len(plan.colorway_inserts),
+            len(plan.colorway_updates),
+        )
+    return counts

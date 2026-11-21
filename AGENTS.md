@@ -213,8 +213,13 @@ source: it is JavaScript's `undefined` versus `null`.
   is logged and retried on the next run.
 - A maker that fails is logged and skipped, and the run still exits 0: a deleted
   or broken doc is routine and must not stop the other makers or the next
-  workflow step. Failed makers are listed at the end of the log and in the job
-  summary. A source that returns nothing changes nothing.
+  workflow step. Failed makers are listed at the end of the log. A source that
+  returns nothing changes nothing.
+- The job summary (`summary()` in `bowerbird/__main__.py`) has a row per maker
+  whose sync changed something (rows added, updated, removed, images uploaded;
+  in a dry run, what would change), a total, the count of makers with no
+  changes, and the makers that failed or were disabled. Writes that change
+  nothing log nothing, so a quiet maker shows only its "Syncing" line.
 - When colorways were added or changed, the maker's `contributors` and
   `updated_at` are refreshed from the last doc's Drive revisions.
 
