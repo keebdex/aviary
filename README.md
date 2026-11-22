@@ -169,9 +169,10 @@ uv run magpie topic 127176
   keyset as its `match_key` and waits for staff, as do incomplete and older
   ones; a different status is reported, never written.
 - `topic` prints one topic as JSON and needs no database.
-- Needs the `ingest` schema and the `forum` revision source (migration
-  `20261119000000_ingest_schema.sql` in Keebdex's supabase repository), with
-  `ingest` added to the Data API's exposed schemas.
+- Needs the `ingest` schema (migration `20261119000000_ingest_schema.sql` in
+  Keebdex's supabase repository), with `ingest` added to the Data API's exposed
+  schemas. Promoted keysets show in Keebdex's history under the
+  `magpie.geekhack` revision source.
 - `.github/workflows/magpie.yml` runs the crawl, the promotion, or both from
   the Actions tab, as a dry run unless the box is unticked. Its schedule is off
   until the schema is applied and a dry run has been checked.

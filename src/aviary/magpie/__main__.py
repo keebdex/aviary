@@ -8,7 +8,7 @@
 run's watermark into `ingest.threads`, fetches the first post of due threads,
 and adds what it reads as keyset candidates to `ingest.candidates`. `promote`
 inserts the complete new keyset candidates into Keebdex as Pending keysets
-with their kits (revision source `forum`); the rest wait for staff. `topic`
+with their kits (revision source `magpie.geekhack`); the rest wait for staff. `topic`
 prints one topic as JSON, without a database.
 """
 
@@ -24,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 from supabase import Client
 
 from aviary.common.config import MissingSettingError
-from aviary.common.db import Row, create_supabase
+from aviary.common.db import Row, create_supabase, revision_source
 from aviary.common.report import configure_logging, write_summary
 from aviary.magpie import apply
 from aviary.magpie.classify import suggest
@@ -50,8 +50,9 @@ from aviary.magpie.proposal import EXTRACTOR_VERSION, MODULE, Topic, extract
 
 log = logging.getLogger("magpie")
 
-# The revision source Keebdex shows magpie's keysets under.
-SOURCE = "forum"
+# The revision source Keebdex shows magpie's keysets under: the job, then the
+# site its candidates come from.
+SOURCE = revision_source("magpie", "geekhack")
 DEFAULT_MAX_PAGES = 5
 DEFAULT_FETCH_LIMIT = 100
 DEFAULT_PROMOTE_LIMIT = 25
