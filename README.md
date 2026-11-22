@@ -6,13 +6,13 @@ bird:
 | Module      | What it does                                   | Status  |
 | ----------- | ---------------------------------------------- | ------- |
 | `lorikeet`  | Adds reference color palettes (RAL) to Keebdex | Ready   |
-| `bowerbird` | Syncs artisan catalogs from makers and Docs    | Porting |
-| `pelican`   | Keeps Keebdex's images on Cloudflare and in R2 | Porting |
+| `bowerbird` | Syncs artisan catalogs from makers and Docs    | Ready   |
+| `pelican`   | Keeps Keebdex's images on Cloudflare and in R2 | Ready   |
 | `magpie`    | Crawls forum interest checks and group buys    | Porting |
 
-`bowerbird` and `pelican` take over the artisan sync and the image jobs from
+`bowerbird` and `pelican` took over the artisan sync and the image jobs from
 [catalog-sync](https://github.com/keebdex/catalog-sync), which keeps only its
-vendor keyset scraper until `magpie` replaces it.
+vendor keyset scraper, run by hand, until `magpie` replaces it.
 
 ## Setup
 
@@ -71,9 +71,8 @@ Design code up on ralcolorchart.com as it is typed.
 ## bowerbird
 
 Syncs artisan sculpts and colorways into Keebdex from makers' Google Docs and
-maker websites. It is a port of catalog-sync's artisan sync, which still runs in
-production: run bowerbird only as a dry run until catalog-sync's `artisan-sync`
-workflow stops.
+maker websites. It is a port of catalog-sync's artisan sync, and replaces it in
+production.
 
 ```bash
 uv run --env-file .env bowerbird gdoc --dry-run
@@ -98,9 +97,8 @@ uv run --env-file .env bowerbird scrape --dry-run
   here deletes an image: `pelican prune` removes the unused ones.
 - `.github/workflows/bowerbird.yml` runs either or both from the Actions tab, as
   a dry run unless the box is unticked, and lists in the run's summary what
-  each maker's sync changed (or would change). While catalog-sync still runs the
-  artisan sync (23:00 UTC), it also runs daily at 21:30 UTC, always as a dry
-  run, so its log can be checked against what catalog-sync then writes.
+  each maker's sync changed (or would change). It also runs both daily at
+  23:00 UTC, writing.
 - Slugs come from python-slugify; `docs/slugs.md` explains the map that keeps
   the slugs catalog-sync gave unusual names, and the check to run before
   bowerbird takes over.
@@ -108,9 +106,7 @@ uv run --env-file .env bowerbird scrape --dry-run
 ## pelican
 
 Keeps Keebdex's images on Cloudflare Images and backed up in Cloudflare R2: a
-port of catalog-sync's image jobs, which still run in production. Run pelican
-only as a dry run until catalog-sync's `image-sync`, `image-prune`, and `backup`
-workflows stop.
+port of catalog-sync's image jobs, which it replaces in production.
 
 ```bash
 uv run --env-file .env pelican sync --dry-run
@@ -125,10 +121,9 @@ uv run --env-file .env pelican sync --dry-run
   missing or orphaned at once) instead of acting on them.
 - `.github/workflows/pelican.yml` runs one job from the Actions tab, as a dry
   run unless the box is unticked, plus a `database` job that dumps the database
-  to R2. While catalog-sync still runs these jobs, it also runs each an hour
-  before catalog-sync does, always as a dry run: sync and restore at 00:00 UTC,
-  backup at 01:00, and prune at 23:00 before the 1st and the 15th. The
-  `database` job runs by hand only until catalog-sync's backup is turned off.
+  to R2. On schedule it writes: sync and restore daily at 01:00 UTC (two hours
+  after bowerbird), backup and the `database` dump at 02:00, and prune at 00:00
+  on the 1st and the 15th.
 - `docs/backups.md` is the operator guide for the R2 bucket: its locks, the
   trash, and restoring by hand.
 

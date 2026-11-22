@@ -15,22 +15,14 @@ on:
         description: Go past the safety ratio (restore --force, backup --force-trash)
         type: boolean
         default: false
-  # Scheduled runs are always dry runs, an hour before the catalog-sync
-  # workflow that still runs the same job (UTC), whose run shows what this one
-  # logged it would do:
-  # - sync then restore at 00:00 (image-sync, 01:00)
-  # - backup at 01:00 (backup, 02:00); the database job runs by hand only for
-  #   now, as a dry run only proves pg_dump works
-  # - prune at 23:00 the day before the 1st and the 15th (image-prune, 00:00);
-  #   GitHub has no "last day of the month", so it runs on each of the 28th to
-  #   31st
-  # Once catalog-sync's workflows are gone, let scheduled runs write (drop the
-  # schedule checks below), move each to catalog-sync's time, and run the
-  # database job with backup again.
+  # Scheduled runs write, at catalog-sync's old times (UTC):
+  # - sync then restore at 01:00, two hours after bowerbird
+  # - backup and the database dump at 02:00, after sync's uploads
+  # - prune at 00:00 on the 1st and the 15th
   schedule:
-    - cron: '0 0 * * *'
     - cron: '0 1 * * *'
-    - cron: '0 23 14,28-31 * *'
+    - cron: '0 2 * * *'
+    - cron: '0 0 1,15 * *'
 
 concurrency:
   group: pelican-${{ inputs.job || github.event.schedule }}
@@ -74,14 +66,14 @@ jobs:
         env:
           SCHEDULE: ${{ github.event.schedule }}
           JOB: ${{ inputs.job }}
-          DRY_RUN: ${{ (github.event_name == 'schedule' || inputs.dry-run) && '--dry-run' || '' }}
+          DRY_RUN: ${{ inputs.dry-run && '--dry-run' || '' }}
           FORCE_RESTORE: ${{ inputs.force && inputs.job == 'restore' && '--force' || '' }}
           FORCE_TRASH: ${{ inputs.force && inputs.job == 'backup' && '--force-trash' || '' }}
         run: |
           case "$SCHEDULE" in
-            '0 0 * * *') jobs='sync restore' ;;
-            '0 1 * * *') jobs='backup' ;;
-            '0 23 14,28-31 * *') jobs='prune' ;;
+            '0 1 * * *') jobs='sync restore' ;;
+            '0 2 * * *') jobs='backup' ;;
+            '0 0 1,15 * *') jobs='prune' ;;
             *) jobs="$JOB" ;;
           esac
           for job in $jobs; do
@@ -90,8 +82,9 @@ jobs:
             echo "::endgroup::"
           done
 
+  # By hand, or with the scheduled backup
   database:
-    if: inputs.job == 'database'
+    if: inputs.job == 'database' || github.event.schedule == '0 2 * * *'
     runs-on: ubuntu-latest
     env:
       # Session pooler URL: GitHub runners have no IPv6 for the direct host
