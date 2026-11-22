@@ -418,6 +418,17 @@ def test_a_candidate_triaged_meanwhile_rolls_its_keyset_back():
     assert client.rows["candidates"] == [{"id": 1, "state": "dismissed"}, *waiting(2)]
 
 
+def test_a_triaged_candidate_whose_keyset_stays_is_only_failed():
+    client = FakeClient(
+        [{"id": 1, "state": "dismissed"}], failing={("keysets", "delete")}
+    )
+    plan = PromotionPlan(promotions=[Promotion(1, 200, payload("a"))])
+    result = apply.apply_promotions(client, plan, dry_run=False)
+    # the keyset is still in Keebdex: not "removed again"
+    assert result == PromotionResult(failed=[200])
+    assert [k["slug"] for k in client.rows["keysets"]] == ["a"]
+
+
 def test_a_failed_rollback_is_reported_and_the_run_goes_on():
     client = FakeClient(
         waiting(1, 2), failing={("keyset_kits", "insert"), ("keysets", "delete")}

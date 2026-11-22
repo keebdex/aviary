@@ -339,9 +339,11 @@ def apply_promotions(
                 promotion.candidate_id,
                 promotion.key,
             )
-            result.triaged.append(topic)
             failed_keys.add(promotion.key)
-            if not _remove_keyset(client, promotion, keyset_id):
+            # listed once: triaged only when its keyset is really gone again
+            if _remove_keyset(client, promotion, keyset_id):
+                result.triaged.append(topic)
+            else:
                 result.failed.append(topic)
 
     for rematch in plan.rematches:
