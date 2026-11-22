@@ -24,7 +24,8 @@ separate repository).
   it.
   - `config.py`: `require_env(name)` for settings.
   - `db.py`: `create_supabase(source=None)`, the only way to create a Supabase
-    client (see "Revision sources"); `fetch_all(client, table, columns, where)`
+    client, and `revision_source(job, origin)` for its source (see "Revision
+    sources"); `fetch_all(client, table, columns, where)`
     for every paged read; `PUBLISHED_FILTER` (Keebdex's published rule); `Row`.
   - `pool.py`: `run_each(items, work)`, network work a few at a time
     (`CONCURRENCY`), counting failures.
@@ -101,13 +102,18 @@ service role key it trusts two request headers to tell which job made a change:
 `x-keebdex-source` and `x-keebdex-run` (`GITHUB_RUN_ID` in CI, otherwise a UUID
 per process). `create_supabase(source)` sends them when `source` is given.
 
-- Pass a source only for jobs that write revisioned tables. A new source must
-  also be whitelisted in Keebdex's `record_revision()` trigger and the
-  `record_revisions_source_check` constraint (a migration in
-  `../keebdex/supabase`).
+- Pass a source only for jobs that write revisioned tables, built with
+  `revision_source(job, origin)`: `<job>.<origin>`, the command that writes and
+  the site or document it read, both lowercase slugs. Keebdex accepts any value
+  of that shape (`is_sync_revision_source()`), so a new job or site needs no
+  migration; `revision_source()` raises on any other, which Keebdex would
+  silently record as `sql`.
 - `lorikeet` writes only `colors`, which has no revisions, and sends no source.
-- `bowerbird gdoc` sends `gdoc` and `bowerbird scrape` sends `scraper`, the
-  sources catalog-sync used, so Keebdex shows their changes the same way.
+- `bowerbird gdoc` sends `bowerbird.gdoc`; `bowerbird scrape` gives each maker
+  a client of its own sending `bowerbird.<maker_id>`; `pelican sync` sends
+  `pelican.cloudflare-images`; `magpie` will send `magpie.<site>`
+  (`magpie.geekhack`, `magpie.novelkeys`). These are not the `source` column of
+  the artisan rows (`gdoc`, `scraper`), which says which sync owns a row.
 
 ## Artisan sync
 
@@ -234,9 +240,9 @@ back. `pelican/references.py` lists the columns in `IMAGE_COLUMNS`, which `sync`
 uploads into too (a test checks it): add a column there whenever a table starts
 storing Cloudflare images, or `prune` deletes its images.
 
-- `pelican sync` (`image-sync` revision source) uploads external images of
-  published rows (the row and its keyset, keyboard, or sculpt null or Approved)
-  under readable ids ending in a CRC32 of the source URL:
+- `pelican sync` (`pelican.cloudflare-images` revision source) uploads external
+  images of published rows (the row and its keyset, keyboard, or sculpt null or
+  Approved) under readable ids ending in a CRC32 of the source URL:
   `keyset/<profile_keyset_id>/<hash>` (cover), `.../order-graph/<hash>`,
   `.../order-history/<hash>`, `keyset/<pk>/kit/<id>/<kit_id or slug>/<hash>`,
   `keyboard/<brand_keyboard_slug>/<release_id>/<variant slug>/<side>/<hash>`,

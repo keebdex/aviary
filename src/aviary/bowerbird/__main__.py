@@ -14,7 +14,7 @@ import argparse
 import logging
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import httpx
 from supabase import Client
@@ -28,15 +28,17 @@ from aviary.bowerbird.makers import PARTIAL_MAKERS, SCRAPERS
 from aviary.bowerbird.plan import Row, SyncPlan, plan_maker_sync
 from aviary.common import cf_images
 from aviary.common.config import MissingSettingError
-from aviary.common.db import create_supabase
+from aviary.common.db import create_supabase, revision_source
 from aviary.common.http import create_http_client
 from aviary.common.report import configure_logging, write_summary
 
 log = logging.getLogger("bowerbird")
 
-# The `source` of the rows each command owns, which is also the revision
-# source Keebdex shows their changes under.
+# The `source` of the rows each command owns (artisan_sculpts and
+# artisan_colorways). Their revisions are named apart, after the site read:
+# `bowerbird.gdoc` and `bowerbird.<maker_id>`.
 SCRAPER_SOURCE = "scraper"
+GDOC_REVISION_SOURCE = revision_source("bowerbird", importer.SOURCE)
 
 # Summary columns: plan_counts keys, then the images uploaded.
 COLUMNS = (
@@ -165,7 +167,7 @@ class Run:
         )
 
 
-def start(source: str, dry_run: bool) -> Run:
+def start(source: str | None, dry_run: bool) -> Run:
     http = create_http_client()
     existing_ids = cf_images.list_image_ids(http)
     log.info("Cloudflare images: %d", len(existing_ids))
@@ -183,6 +185,10 @@ def sync_websites(run: Run, maker_ids: list[str]) -> Outcome:
     for maker_id in maker_ids:
         log.info("Scraping %s", maker_id)
         try:
+            # each maker's website is its own revision source
+            maker_run = replace(
+                run, client=create_supabase(revision_source("bowerbird", maker_id))
+            )
             tables = [
                 {
                     **table,
@@ -193,13 +199,13 @@ def sync_websites(run: Run, maker_ids: list[str]) -> Outcome:
                 }
                 for table in SCRAPERS[maker_id](run.http)
             ]
-            plan, counts = run.sync(
+            plan, counts = maker_run.sync(
                 maker_id,
                 tables,
                 SCRAPER_SOURCE,
                 preserve_missing=maker_id in PARTIAL_MAKERS,
             )
-            outcome.record(maker_id, counts | {"images": run.upload_images(plan)})
+            outcome.record(maker_id, counts | {"images": maker_run.upload_images(plan)})
         except Exception:
             log.exception("Maker %s failed", maker_id)
             outcome.failed.append(maker_id)
@@ -265,7 +271,8 @@ def sync_documents(run: Run, maker_ids: list[str] | None) -> Outcome:
 def main(argv: Sequence[str] | None = None) -> int:
     configure_logging()
     args = parse_args(argv)
-    source = importer.SOURCE if args.command == "gdoc" else SCRAPER_SOURCE
+    # scrape gives every maker a client of its own (sync_websites)
+    source = GDOC_REVISION_SOURCE if args.command == "gdoc" else None
     try:
         run = start(source, args.dry_run)
         # start() already used the client, so it can't be entered with `with`

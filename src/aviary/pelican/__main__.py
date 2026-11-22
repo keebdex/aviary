@@ -17,7 +17,7 @@ from collections.abc import Sequence
 
 from aviary.common import cf_images
 from aviary.common.config import MissingSettingError
-from aviary.common.db import create_supabase
+from aviary.common.db import create_supabase, revision_source
 from aviary.common.http import create_http_client
 from aviary.common.r2 import Bucket
 from aviary.common.report import configure_logging
@@ -26,7 +26,7 @@ from aviary.pelican import maintenance, sync
 log = logging.getLogger("pelican")
 
 # The revision source Keebdex shows sync's row changes under.
-SYNC_SOURCE = "image-sync"
+SYNC_SOURCE = revision_source("pelican", "cloudflare-images")
 
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
