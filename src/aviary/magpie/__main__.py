@@ -170,12 +170,14 @@ class Counters:
     threads_changed: int = 0
     threads_failed: int = 0
     candidates: int = 0
+    candidates_restored: int = 0
     failures: list[tuple[str, str]] = field(default_factory=list)
 
     def columns(self) -> Row:
         """The `crawl_runs` counters."""
         values = asdict(self)
-        del values["candidates"], values["failures"]
+        del values["candidates"], values["candidates_restored"]
+        del values["failures"]
         return values
 
 
@@ -254,8 +256,11 @@ class Crawl:
             "confidence": extraction.confidence,
             "match_key": match["profile_keyset_id"] if match else None,
         }
-        if apply.save_candidate(self.client, candidate, self.dry_run):
+        saved = apply.save_candidate(self.client, candidate, self.dry_run)
+        if saved == apply.ADDED:
             self.counters.candidates += 1
+        elif saved == apply.RESTORED:
+            self.counters.candidates_restored += 1
 
     def fail(self, thread: Row, error: Exception, now: datetime) -> None:
         """A failed fetch is routine (a deleted topic, a hiccup): back off,
@@ -291,6 +296,8 @@ def crawl_summary(
         f" ({counters.threads_changed} with an edited first post)",
         f"- {'Would add' if dry_run else 'Added'} keyset candidates: "
         f"{counters.candidates}",
+        "- Keyset candidates waiting again (first post reverted to an earlier"
+        f" version): {counters.candidates_restored}",
         f"- Failed fetches: {counters.threads_failed}",
     ]
     lines += [f"  - {_topic_link(t)}: {e}" for t, e in counters.failures[:MAX_LISTED]]
@@ -401,9 +408,12 @@ def finish(
 # promote
 
 
-def promote_summary(plan: PromotionPlan, failed: list[int], dry_run: bool) -> str:
+def promote_summary(
+    plan: PromotionPlan, result: apply.PromotionResult, dry_run: bool
+) -> str:
     verb = "Would insert" if dry_run else "Inserted"
-    inserted = [p for p in plan.promotions if p.topic_id not in failed]
+    failed, triaged = result.failed, result.triaged
+    inserted = [p for p in plan.promotions if p.topic_id not in failed + triaged]
     differences = [r for r in plan.rematches if r.difference]
     lines = [
         "## magpie promote",
@@ -413,6 +423,7 @@ def promote_summary(plan: PromotionPlan, failed: list[int], dry_run: bool) -> st
         f"- Incomplete (left for staff): {len(plan.incomplete)}",
         f"- Older than the cut-off (left for staff): {plan.old}",
         f"- Left for the next run (limit): {plan.deferred}",
+        f"- Triaged by staff meanwhile (keyset removed again): {len(triaged)}",
         f"- Failed: {len(failed)}",
     ]
     if inserted:
@@ -431,6 +442,9 @@ def promote_summary(plan: PromotionPlan, failed: list[int], dry_run: bool) -> st
     if plan.incomplete:
         lines += ["", "### Incomplete", ""]
         lines += [f"- {_topic_link(t)}: {m}" for t, m in plan.incomplete[:MAX_LISTED]]
+    if triaged:
+        lines += ["", "### Triaged by staff meanwhile", ""]
+        lines += [f"- {_topic_link(t)}" for t in triaged[:MAX_LISTED]]
     if failed:
         lines += ["", "### Failed", ""]
         lines += [f"- {_topic_link(t)}" for t in failed[:MAX_LISTED]]
@@ -450,11 +464,11 @@ def run_promote(args: argparse.Namespace) -> int:
         limit=args.limit,
         posted_since=since,
     )
-    failed = apply.apply_promotions(client, plan, args.dry_run)
-    summary = promote_summary(plan, failed, args.dry_run)
+    result = apply.apply_promotions(client, plan, args.dry_run)
+    summary = promote_summary(plan, result, args.dry_run)
     log.info("\n%s", summary)
     write_summary(summary)
-    return 1 if failed else 0
+    return 1 if result.failed else 0
 
 
 # topic

@@ -7,6 +7,7 @@ from postgrest import APIError
 
 from aviary.magpie import __main__ as magpie
 from aviary.magpie import apply
+from aviary.magpie.apply import PromotionResult
 from aviary.magpie.fetch import FetchError
 from aviary.magpie.parsers import BoardPage, KitImage, TopicDetail, TopicSummary
 from aviary.magpie.plan import KeysetIndex, Promotion, PromotionPlan, Rematch
@@ -201,7 +202,7 @@ def crawl(monkeypatch, result, writes):
     monkeypatch.setattr(
         apply,
         "save_candidate",
-        lambda c, row, dry: writes.append(("candidate", row)) or True,
+        lambda c, row, dry: writes.append(("candidate", row)) or apply.ADDED,
     )
     return magpie.Crawl(
         None, Fetches(result), PROFILES, KeysetIndex([_keyset()]), False
@@ -258,6 +259,23 @@ def test_a_candidate_of_a_keyset_keebdex_has_gets_its_match_key(monkeypatch):
     assert run.counters.threads_changed == 1
 
 
+def test_a_restored_candidate_is_counted_apart_from_added_ones(monkeypatch):
+    detail = TopicDetail(
+        posted_at="Sat, 14 November 2026, 23:03:52",
+        body="b",
+        kit_images=[KitImage("https://i.example/a.png")],
+    )
+    run = crawl(monkeypatch, detail, [])
+    monkeypatch.setattr(apply, "save_candidate", lambda c, row, dry: apply.RESTORED)
+    run.fetch(THREAD)
+    assert (run.counters.candidates, run.counters.candidates_restored) == (0, 1)
+    summary = magpie.crawl_summary(False, run.counters, [], None)
+    assert "Added keyset candidates: 0" in summary
+    assert "earlier version): 1" in summary
+    # not a crawl_runs column
+    assert "candidates_restored" not in run.counters.columns()
+
+
 def test_a_404_marks_the_thread_gone(monkeypatch):
     writes = []
     crawl(monkeypatch, FetchError("HTTP 404", 404), writes).fetch(THREAD)
@@ -296,6 +314,10 @@ class Table:
         self.op = "delete"
         return self
 
+    def select(self, columns):
+        self.op = "select"
+        return self
+
     def eq(self, column, value):
         self.filters.append((column, value))
         return self
@@ -310,15 +332,23 @@ class Table:
         elif self.op == "update":
             for row in hit:
                 row.update(self.values)
-        else:
-            hit = [{"id": len(table) + 1, **r} for r in self.rows]
-            table += hit
+        elif self.op == "insert":
+            if self.name in self.db.dropped:
+                # a before-insert trigger returned null
+                hit = []
+            else:
+                hit = [{"id": len(table) + 1, **r} for r in self.rows]
+                table += hit
+        if (self.name, self.op) in self.db.lost:
+            raise RuntimeError(f"{self.name} {self.op}: response lost")
         return type("Response", (), {"data": hit})
 
 
 class FakeClient:
-    def __init__(self, candidates, failing=()):
-        self.failing = set(failing)
+    def __init__(self, candidates, failing=(), lost=(), dropped=()):
+        # failing: refused before applying; lost: applied, then the response
+        # never came back; dropped: inserts a trigger turned away
+        self.failing, self.lost, self.dropped = set(failing), set(lost), set(dropped)
         self.rows = {"keysets": [], "keyset_kits": [], "candidates": candidates}
 
     def table(self, name):
@@ -346,7 +376,7 @@ def test_promotion_inserts_and_marks_the_candidate():
         promotions=[Promotion(1, 200, payload("a"))],
         rematches=[Rematch(2, 100, "gmk/a")],
     )
-    assert apply.apply_promotions(client, plan, dry_run=False) == []
+    assert apply.apply_promotions(client, plan, dry_run=False) == PromotionResult()
     (keyset,) = client.rows["keysets"]
     assert (keyset["profile_keyset_id"], keyset["review_status"]) == (
         "gmk/a",
@@ -368,7 +398,8 @@ def test_a_keyset_whose_kits_fail_is_removed_and_its_candidates_wait():
         promotions=[Promotion(1, 200, payload("a"))],
         rematches=[Rematch(2, 100, "gmk/a")],
     )
-    assert apply.apply_promotions(client, plan, dry_run=False) == [200]
+    result = apply.apply_promotions(client, plan, dry_run=False)
+    assert result == PromotionResult(failed=[200])
     assert client.rows["keysets"] == []
     assert client.rows["candidates"] == waiting(1, 2)
 
@@ -380,7 +411,8 @@ def test_a_candidate_triaged_meanwhile_rolls_its_keyset_back():
         promotions=[Promotion(1, 200, payload("a"))],
         rematches=[Rematch(2, 100, "gmk/a")],
     )
-    assert apply.apply_promotions(client, plan, dry_run=False) == []
+    result = apply.apply_promotions(client, plan, dry_run=False)
+    assert result == PromotionResult(triaged=[200])
     assert client.rows["keysets"] == []
     assert client.rows["keyset_kits"] == []
     assert client.rows["candidates"] == [{"id": 1, "state": "dismissed"}, *waiting(2)]
@@ -393,16 +425,89 @@ def test_a_failed_rollback_is_reported_and_the_run_goes_on():
     plan = PromotionPlan(
         promotions=[Promotion(1, 200, payload("a")), Promotion(2, 300, payload("b"))]
     )
-    assert apply.apply_promotions(client, plan, dry_run=False) == [200, 300]
+    result = apply.apply_promotions(client, plan, dry_run=False)
+    assert result == PromotionResult(failed=[200, 300])
     # both promotions were tried; their keysets are left for staff to remove
     assert [k["slug"] for k in client.rows["keysets"]] == ["a", "b"]
     assert client.rows["candidates"] == waiting(1, 2)
 
 
+def test_a_claim_whose_response_was_lost_keeps_its_keyset():
+    # the database promoted the candidate, but the response never came back
+    client = FakeClient(waiting(1), lost={("candidates", "update")})
+    plan = PromotionPlan(promotions=[Promotion(1, 200, payload("a"))])
+    assert apply.apply_promotions(client, plan, dry_run=False) == PromotionResult()
+    (keyset,) = client.rows["keysets"]
+    (candidate,) = client.rows["candidates"]
+    assert (candidate["state"], candidate["promoted_id"]) == ("promoted", keyset["id"])
+    assert len(client.rows["keyset_kits"]) == 1
+
+
+def test_a_claim_that_did_not_apply_rolls_back_and_the_candidate_waits():
+    client = FakeClient(waiting(1), failing={("candidates", "update")})
+    plan = PromotionPlan(promotions=[Promotion(1, 200, payload("a"))])
+    result = apply.apply_promotions(client, plan, dry_run=False)
+    assert result == PromotionResult(failed=[200])
+    assert client.rows["keysets"] == []
+    assert client.rows["keyset_kits"] == []
+    assert client.rows["candidates"] == waiting(1)
+
+
+def test_a_claim_that_cannot_be_read_back_keeps_its_keyset():
+    client = FakeClient(
+        waiting(1), failing={("candidates", "update"), ("candidates", "select")}
+    )
+    plan = PromotionPlan(promotions=[Promotion(1, 200, payload("a"))])
+    result = apply.apply_promotions(client, plan, dry_run=False)
+    assert result == PromotionResult(failed=[200])
+    # never delete what a candidate may point at
+    assert [k["slug"] for k in client.rows["keysets"]] == ["a"]
+
+
+def test_the_promote_summary_lists_triaged_topics_apart_from_inserted():
+    plan = PromotionPlan(
+        promotions=[Promotion(1, 200, payload("a")), Promotion(2, 300, payload("b"))]
+    )
+    summary = magpie.promote_summary(plan, PromotionResult(triaged=[300]), False)
+    assert "- Inserted (Pending): 1" in summary
+    assert "- Triaged by staff meanwhile (keyset removed again): 1" in summary
+    assert "topic=300" in summary.split("### Triaged by staff meanwhile")[1]
+    assert "`gmk/b`" not in summary
+
+
+# candidates and the supersede trigger
+
+
+def candidate_row(**values):
+    return {
+        "thread_id": 3,
+        "module": "Keyset",
+        "extractor_version": "magpie-1",
+        "content_hash": "h",
+        **values,
+    }
+
+
+def test_a_new_extraction_is_added():
+    client = FakeClient([])
+    assert apply.save_candidate(client, candidate_row(), False) == apply.ADDED
+
+
+def test_a_superseded_extraction_brought_back_by_a_revert_is_restored():
+    client = FakeClient([candidate_row(state="superseded")], dropped={"candidates"})
+    assert apply.save_candidate(client, candidate_row(), False) == apply.RESTORED
+
+
+@pytest.mark.parametrize("state", ["new", "dismissed", "promoted"])
+def test_an_extraction_already_made_is_not_counted(state):
+    client = FakeClient([candidate_row(state=state)], dropped={"candidates"})
+    assert apply.save_candidate(client, candidate_row(), False) is None
+
+
 def test_a_dry_run_writes_nothing():
     client = FakeClient(waiting(1), failing={"keysets", "keyset_kits", "candidates"})
     plan = PromotionPlan(promotions=[Promotion(1, 200, payload("a"))])
-    assert apply.apply_promotions(client, plan, dry_run=True) == []
+    assert apply.apply_promotions(client, plan, dry_run=True) == PromotionResult()
 
 
 def test_kit_rows_follow_the_keyset_key():

@@ -271,8 +271,11 @@ topic, and staff review the result in Keebdex instead.
   `payload` shaped like the keyset submission (`keyset` columns, `kits`),
   `confidence` per field, `match_key` when Keebdex has the keyset. The
   `candidates_supersede` trigger drops an extraction already made (same
-  `EXTRACTOR_VERSION` and content) and supersedes the waiting one; bump the
-  version when `extract()` changes. Keyboards are not extracted yet.
+  `EXTRACTOR_VERSION` and content) and supersedes the waiting one; when the
+  first post goes back to an earlier version it puts that superseded
+  extraction back to `new` (the summary counts these apart, from the state
+  read before the insert). Bump the version when `extract()` changes.
+  Keyboards are not extracted yet.
 - Extraction: the title's keycap code must name exactly one published profile
   (`profile_id`, then name: KKB is `keykobo`); a second code ("GMK MTNU
   Dasher") picks that profile. The name drops the codes and the profile's name
@@ -288,14 +291,16 @@ topic, and staff review the result in Keebdex instead.
   `Pending` with a null `submitted_by`, like catalog-sync's vendor keysets,
   then the candidate `promoted` (`promoted_kind` keyset). Keebdex's keyset
   queue lists kits, so when the kits fail, or staff triaged the candidate
-  meanwhile (the update finds it no longer `new`), the keyset just inserted
-  and its kits are deleted again; a failed delete is logged with the id for
-  removal by hand and the run goes on. A candidate whose keyset Keebdex has
-  now (its topic's URL in any `topic=` form, or its key, of any source or
-  review status, or a keyset this run inserts) gets that `match_key` and
-  waits for staff as an edit; keysets
-  are never updated, a different status is only reported. Everything else
-  waits for staff.
+  meanwhile (the claim finds it no longer `new`; listed apart in the
+  summary, not a failure), the keyset just inserted and its kits are deleted
+  again. A claim that raises is read back first: the keyset stays when the
+  candidate is promoted to it or cannot be read, so no candidate points at a
+  deleted keyset. A failed delete is logged with the id for removal by hand
+  and the run goes on. A candidate whose keyset Keebdex has now (its topic's
+  URL in any `topic=` form, or its key, of any source or review status, or a
+  keyset this run inserts) gets that `match_key` and waits for staff as an
+  edit; keysets are never updated, a different status is only reported.
+  Everything else waits for staff.
 - An empty read of keysets or profiles writes nothing; a failed promotion
   makes `promote` exit 1. Images stay external: `pelican sync` uploads them
   once staff approve.
