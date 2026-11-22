@@ -2,6 +2,7 @@
 
     magpie crawl [--board ic|gb ...] [--max-pages N] [--fetch-limit N] [--dry-run]
     magpie promote [--limit N] [--max-age-days N] [--dry-run]
+    magpie reextract [--limit N] [--dry-run]
     magpie topic <id|url>
 
 `crawl` is one `ingest.crawl_runs` run: it lists the boards down to the last
@@ -20,6 +21,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from itertools import batched
 
 from supabase import Client
 
@@ -36,7 +38,7 @@ from aviary.magpie.geekhack import (
     parse_time,
     topic_url,
 )
-from aviary.magpie.parsers import parse_board, parse_topic
+from aviary.magpie.parsers import parse_board, parse_post, parse_topic
 from aviary.magpie.plan import (
     BoardListing,
     KeysetIndex,
@@ -45,8 +47,9 @@ from aviary.magpie.plan import (
     plan_promotions,
     refetch_at,
     retry_at,
+    stored_time,
 )
-from aviary.magpie.proposal import EXTRACTOR_VERSION, MODULE, Topic, extract
+from aviary.magpie.proposal import EXTRACTOR_VERSION, MODULE, Extraction, Topic, extract
 
 log = logging.getLogger("magpie")
 
@@ -115,7 +118,17 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help=f"only topics posted in the last N days (default {DEFAULT_MAX_AGE_DAYS})",
     )
 
-    for command in (crawl, promote):
+    reextract = commands.add_parser(
+        "reextract", help="extract stored first posts again (no requests to Geekhack)"
+    )
+    reextract.add_argument(
+        "--limit",
+        type=int,
+        metavar="N",
+        help="extract at most N threads, oldest first (default: all)",
+    )
+
+    for command in (crawl, promote, reextract):
         command.add_argument(
             "--dry-run",
             action="store_true",
@@ -127,6 +140,8 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.command == "crawl" and not 1 <= args.fetch_limit <= 1000:
         parser.error("--fetch-limit must be between 1 and 1000")
+    if args.command == "reextract" and args.limit is not None and args.limit < 1:
+        parser.error("--limit must be at least 1")
     if args.command == "crawl" and args.max_pages < 1:
         parser.error("--max-pages must be at least 1")
     return args
@@ -173,13 +188,48 @@ class Counters:
     candidates: int = 0
     candidates_restored: int = 0
     failures: list[tuple[str, str]] = field(default_factory=list)
+    # keyset titles whose keycap code names no Keebdex profile, by code, and
+    # how many keyset titles had no code at all: profiles staff may add
+    unknown_profiles: dict[str, list[str]] = field(default_factory=dict)
+    no_profile_code: int = 0
 
     def columns(self) -> Row:
         """The `crawl_runs` counters."""
         values = asdict(self)
-        del values["candidates"], values["candidates_restored"]
-        del values["failures"]
+        for only_reported in (
+            "candidates",
+            "candidates_restored",
+            "failures",
+            "unknown_profiles",
+            "no_profile_code",
+        ):
+            del values[only_reported]
         return values
+
+    def count_profile(self, extraction: Extraction, title: str) -> None:
+        if extraction.profile_id is not None:
+            return
+        if extraction.profile_code is None:
+            self.no_profile_code += 1
+        else:
+            self.unknown_profiles.setdefault(extraction.profile_code, []).append(title)
+
+
+def candidate_row(
+    thread: Row, content_hash: str, extraction: Extraction, index: KeysetIndex
+) -> Row:
+    """The `ingest.candidates` row of a thread's extraction, with the
+    match_key of the keyset Keebdex has for it."""
+    match = index.match(int(thread["external_id"]), extraction.key)
+    return {
+        "thread_id": thread["id"],
+        "module": MODULE,
+        "extractor_version": EXTRACTOR_VERSION,
+        "content_hash": content_hash,
+        "payload": extraction.payload,
+        "confidence": extraction.confidence,
+        "match_key": match["profile_keyset_id"] if match else None,
+    }
 
 
 @dataclass
@@ -247,16 +297,8 @@ class Crawl:
 
         if extraction is None:
             return
-        match = self.index.match(topic_id, extraction.key)
-        candidate = {
-            "thread_id": thread["id"],
-            "module": MODULE,
-            "extractor_version": EXTRACTOR_VERSION,
-            "content_hash": content_hash,
-            "payload": extraction.payload,
-            "confidence": extraction.confidence,
-            "match_key": match["profile_keyset_id"] if match else None,
-        }
+        self.counters.count_profile(extraction, topic.title)
+        candidate = candidate_row(thread, content_hash, extraction, self.index)
         saved = apply.save_candidate(self.client, candidate, self.dry_run)
         if saved == apply.ADDED:
             self.counters.candidates += 1
@@ -309,7 +351,40 @@ def crawl_summary(
         )
     if error:
         lines.append(f"- **Failed**: {error}")
+    lines += _unknown_profiles(counters)
     return "\n".join(lines)
+
+
+# Titles shown per unknown profile code.
+MAX_TITLES_PER_CODE = 3
+
+
+def _unknown_profiles(counters: Counters) -> list[str]:
+    """Keycap codes keyset titles start with that name no Keebdex profile,
+    most threads first: candidates for a new profile."""
+    if not counters.unknown_profiles and not counters.no_profile_code:
+        return []
+    lines = ["", "### Unknown profiles", ""]
+    by_count = sorted(
+        counters.unknown_profiles.items(), key=lambda item: (-len(item[1]), item[0])
+    )
+    for code, titles in by_count[:MAX_LISTED]:
+        shown = "; ".join(titles[:MAX_TITLES_PER_CODE])
+        more = (
+            f" (+{len(titles) - MAX_TITLES_PER_CODE} more)"
+            if len(titles) > MAX_TITLES_PER_CODE
+            else ""
+        )
+        lines.append(f"- `{code}`: {_threads(len(titles))}: {shown}{more}")
+    if counters.no_profile_code:
+        lines.append(
+            f"- No profile code in the title: {_threads(counters.no_profile_code)}"
+        )
+    return lines
+
+
+def _threads(count: int) -> str:
+    return f"{count} thread" if count == 1 else f"{count} threads"
 
 
 def run_crawl(args: argparse.Namespace) -> int:
@@ -472,6 +547,117 @@ def run_promote(args: argparse.Namespace) -> int:
     return 1 if result.failed else 0
 
 
+# reextract
+
+
+@dataclass
+class ReextractCounters:
+    threads: int = 0
+    not_keysets: int = 0
+    added: int = 0
+    restored: int = 0
+    unchanged: int = 0
+    # (topic id, error) of stored posts the parser can't read
+    parse_errors: list[tuple[str, str]] = field(default_factory=list)
+
+
+def reextract_thread(
+    client: Client,
+    thread: Row,
+    raw_body: str,
+    profiles: list[Row],
+    index: KeysetIndex,
+    counters: ReextractCounters,
+    dry_run: bool,
+) -> None:
+    """Extract one stored first post with the current extractor and save
+    its candidate as a crawl would."""
+    counters.threads += 1
+    topic_id = int(thread["external_id"])
+    try:
+        content = parse_post(raw_body)
+    except ValueError as error:
+        log.warning("Topic %d: %s", topic_id, error)
+        counters.parse_errors.append((thread["external_id"], str(error)))
+        return
+    topic = Topic(
+        topic_id=topic_id,
+        board=thread["board"],
+        title=thread["title"] or "",
+        author=thread.get("author") or "",
+        posted_at=stored_time(thread.get("posted_at")),
+        kit_images=content.kit_images,
+    )
+    extraction = extract(topic, profiles)
+    if extraction is None:
+        counters.not_keysets += 1
+        return
+    content_hash = (
+        thread.get("content_hash") or hashlib.sha256(raw_body.encode()).hexdigest()
+    )
+    candidate = candidate_row(thread, content_hash, extraction, index)
+    saved = apply.save_candidate(client, candidate, dry_run)
+    if saved == apply.ADDED:
+        counters.added += 1
+    elif saved == apply.RESTORED:
+        counters.restored += 1
+    else:
+        counters.unchanged += 1
+
+
+def reextract_summary(dry_run: bool, counters: ReextractCounters) -> str:
+    added = "Would add" if dry_run else "Added"
+    lines = [
+        "## magpie reextract",
+        "",
+        f"- Extractor: {EXTRACTOR_VERSION}",
+        f"- Stored threads read: {counters.threads}",
+        f"- Not keysets: {counters.not_keysets}",
+        f"- {added} keyset candidates: {counters.added}",
+        f"- Waiting again (superseded before): {counters.restored}",
+        f"- Already extracted (skipped): {counters.unchanged}",
+        f"- Posts that could not be parsed: {len(counters.parse_errors)}",
+    ]
+    lines += [
+        f"  - {_topic_link(t)}: {e}" for t, e in counters.parse_errors[:MAX_LISTED]
+    ]
+    return "\n".join(lines)
+
+
+def run_reextract(args: argparse.Namespace) -> int:
+    """Read every stored first post again with the current extractor. No
+    requests to Geekhack and no crawl run (watermarks untouched), but never
+    while a crawl runs, so the two don't add the same candidates."""
+    client = create_supabase()
+    profiles = apply.fetch_profiles(client)
+    keysets = apply.fetch_keysets(client)
+    if not profiles or not keysets:
+        log.error(
+            "Read %d profiles and %d keysets, nothing written",
+            len(profiles),
+            len(keysets),
+        )
+        return 1
+    if (run_id := apply.running_run(client, datetime.now(UTC))) is not None:
+        log.error("Crawl run %d is running; not extracting meanwhile", run_id)
+        return 1
+    threads = apply.fetch_stored_threads(client)[: args.limit]
+    log.info("Extracting %d stored threads with %s", len(threads), EXTRACTOR_VERSION)
+    index = KeysetIndex(keysets)
+    counters = ReextractCounters()
+    for batch in batched(threads, apply.BODY_BATCH_SIZE, strict=False):
+        bodies = apply.stored_bodies(client, [thread["id"] for thread in batch])
+        for thread in batch:
+            if (raw_body := bodies.get(thread["id"])) is not None:
+                reextract_thread(
+                    client, thread, raw_body, profiles, index, counters, args.dry_run
+                )
+    summary = reextract_summary(args.dry_run, counters)
+    log.info("\n%s", summary)
+    write_summary(summary)
+    return 0
+
+
 # topic
 
 
@@ -492,7 +678,12 @@ def run_topic(args: argparse.Namespace) -> int:
     return 0
 
 
-COMMANDS = {"crawl": run_crawl, "promote": run_promote, "topic": run_topic}
+COMMANDS = {
+    "crawl": run_crawl,
+    "promote": run_promote,
+    "reextract": run_reextract,
+    "topic": run_topic,
+}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

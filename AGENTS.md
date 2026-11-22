@@ -83,8 +83,8 @@ separate repository).
   (`restore --force`, `backup --limit N --force-trash`).
 - `uv run --env-file .env magpie crawl [--board B] [--max-pages N]
   [--fetch-limit N] [--dry-run]`, `magpie promote [--limit N]
-  [--max-age-days N] [--dry-run]`; `uv run magpie topic <id|url>` (no
-  database).
+  [--max-age-days N] [--dry-run]`, `magpie reextract [--limit N]
+  [--dry-run]`; `uv run magpie topic <id|url>` (no database).
 
 ## Rules for jobs
 
@@ -260,8 +260,10 @@ topic, and staff review the result in Keebdex instead.
   over an hour is marked failed). Each board is listed down to the watermark
   of the last succeeded run (the newest last post it saw), its last page, or
   `--max-pages`; a board the cap stopped is in `incomplete_boards` and keeps
-  its old watermark. Every board is read before anything is written, and only
-  a succeeded run moves watermarks. Stickies are skipped. Geekhack times have
+  its old watermark, or, when it never had one, gets the newest last post it
+  saw (what lies below is backlog, for one run with a higher `--max-pages`).
+  Every board is read before anything is written, and only a succeeded run
+  moves watermarks. Stickies are skipped. Geekhack times have
   no zone and are stored as UTC.
 - A listed thread is due (`next_fetch_at`) when new or when its last post
   moved, gone ones included; otherwise the listing only refreshes it. A fetch
@@ -279,21 +281,39 @@ topic, and staff review the result in Keebdex instead.
   `EXTRACTOR_VERSION` and content) and supersedes the waiting one; when the
   first post goes back to an earlier version it puts that superseded
   extraction back to `new` (the summary counts these apart, from the state
-  read before the insert). Bump the version when `extract()` changes.
-  Keyboards are not extracted yet.
-- Extraction: the title's keycap code must name exactly one published profile
+  read before the insert). Bump the version when `extract()` changes, then
+  run `reextract`. Keyboards are not extracted yet.
+- `reextract` extracts every stored first post (`raw_body`) of threads
+  neither ignored nor gone again with the current `EXTRACTOR_VERSION` and
+  saves candidates as `crawl` does, without requests to Geekhack and without
+  a `crawl_runs` row (watermarks untouched). It refuses while a crawl runs;
+  running it twice adds nothing.
+- Extraction: the title starts with `[GB]`, `[IC]` or `[Pre-order]` (status
+  by board, so a pre-order on the GB board is Confirmed), and its keycap code
+  must name exactly one published profile
   (`profile_id`, then name: KKB is `keykobo`); a second code ("GMK MTNU
   Dasher") picks that profile. The name drops the codes and the profile's name
-  ("GMK CYL Selene" is `gmk/selene`), the slug is `url_slugify`. Status is
+  ("GMK CYL Selene" is `gmk/selene`) and what follows ` | `, ` - `, ` : ` or
+  two spaces (where the listing dropped a dash), and notes in parentheses
+  (progress, new kits, "Previously ..."); the slug is `url_slugify`. Name and
+  slug confidence is 0.6: staff should read them. Status is
   Interest Check on the IC board, Cancelled when the title says so, else
   Confirmed; `ic_date` the IC's posting day; Cherry profiles get sculpt
   `1-1-2-3-4-4`. Kits: one per labelled kit image (`kits.py`), else a Base kit
-  with the cover (the first image when no Base label).
-- `promote` inserts, newest topic first and at most `--limit`, the waiting
-  candidates with no `match_key` whose payload is complete
-  (`missing_for_promotion`) and whose thread was posted within
-  `--max-age-days` and is neither ignored nor gone: the keyset and its kits
-  `Pending` with a null `submitted_by`, like catalog-sync's vendor keysets,
+  with the cover (the first image when no Base label), with `name` null (it
+  holds a kit's own name, never its category's). An image file on
+  `imgur.com` (a redirect page) is stored as its `i.imgur.com` file; a link
+  in the post that is not a URL is skipped, never failing the fetch. The
+  crawl summary lists keycap codes that name no Keebdex profile, with up to
+  3 titles each, and keyset titles with no code: profiles staff may add.
+- `promote` runs only by hand (the workflow's `promote` or `all`, never on
+  schedule) until Keebdex has a Discovered tab: an IC and its GB are two
+  candidates, so it can insert a keyset twice, and covers and kits are not
+  reliable enough for the review queue yet. It inserts, newest topic first
+  and at most `--limit`, the waiting candidates with no `match_key` whose
+  payload is complete (`missing_for_promotion`) and whose thread was posted
+  within `--max-age-days` and is neither ignored nor gone: the keyset and its
+  kits `Pending` with a null `submitted_by`, like catalog-sync's vendor keysets,
   then the candidate `promoted` (`promoted_kind` keyset). Keebdex's keyset
   queue lists kits, so when the kits fail, or staff triaged the candidate
   meanwhile (the claim finds it no longer `new`; listed apart in the

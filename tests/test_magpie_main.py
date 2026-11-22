@@ -11,7 +11,7 @@ from aviary.magpie.apply import PromotionResult
 from aviary.magpie.fetch import FetchError
 from aviary.magpie.parsers import BoardPage, KitImage, TopicDetail, TopicSummary
 from aviary.magpie.plan import KeysetIndex, Promotion, PromotionPlan, Rematch
-from aviary.magpie.proposal import kit_rows
+from aviary.magpie.proposal import EXTRACTOR_VERSION, kit_rows
 
 PROFILES = [{"profile_id": "gmk", "name": "CYL", "profile": "Cherry"}]
 LAST_POST = "Thu, 05 November 2026, 10:00:00"
@@ -276,6 +276,43 @@ def test_a_restored_candidate_is_counted_apart_from_added_ones(monkeypatch):
     assert "candidates_restored" not in run.counters.columns()
 
 
+def test_the_summary_lists_profiles_keebdex_does_not_have(monkeypatch):
+    detail = TopicDetail(
+        posted_at="Sat, 14 November 2026, 23:03:52",
+        body="b",
+        kit_images=[KitImage("https://i.example/a.png")],
+    )
+    run = crawl(monkeypatch, detail, [])
+    # Keebdex has only GMK here (PROFILES)
+    for title in (
+        "[GB] SWG Art",
+        "[GB] SWG Bloom",
+        "[IC] DSS Drank",
+        "[GB] KBS Flat Out keycaps",
+        "[GB] GMK Selene",
+    ):
+        run.fetch({**THREAD, "title": title})
+    assert run.counters.unknown_profiles == {
+        "SWG": ["[GB] SWG Art", "[GB] SWG Bloom"],
+        "DSS": ["[IC] DSS Drank"],
+    }
+    assert run.counters.no_profile_code == 1
+    summary = magpie.crawl_summary(False, run.counters, [], None)
+    section = summary.split("### Unknown profiles")[1]
+    assert section.splitlines()[2:] == [
+        "- `SWG`: 2 threads: [GB] SWG Art; [GB] SWG Bloom",
+        "- `DSS`: 1 thread: [IC] DSS Drank",
+        "- No profile code in the title: 1 thread",
+    ]
+    # only reported, not crawl_runs columns
+    assert "unknown_profiles" not in run.counters.columns()
+
+
+def test_a_summary_without_unknown_profiles_has_no_such_section():
+    summary = magpie.crawl_summary(False, magpie.Counters(), [], None)
+    assert "Unknown profiles" not in summary
+
+
 def test_a_404_marks_the_thread_gone(monkeypatch):
     writes = []
     crawl(monkeypatch, FetchError("HTTP 404", 404), writes).fetch(THREAD)
@@ -336,12 +373,36 @@ class Table:
             if self.name in self.db.dropped:
                 # a before-insert trigger returned null
                 hit = []
+            elif self.name == "candidates":
+                hit = [self._supersede(table, row) for row in self.rows]
+                hit = [row for row in hit if row is not None]
             else:
                 hit = [{"id": len(table) + 1, **r} for r in self.rows]
                 table += hit
         if (self.name, self.op) in self.db.lost:
             raise RuntimeError(f"{self.name} {self.op}: response lost")
         return type("Response", (), {"data": hit})
+
+    @staticmethod
+    def _supersede(table, row):
+        """candidates_supersede: an extraction already made is not inserted
+        again (a superseded one waits again); a new one supersedes the
+        thread's waiting candidate."""
+        key = ("thread_id", "module", "extractor_version", "content_hash")
+        same = [r for r in table if all(r.get(k) == row.get(k) for k in key)]
+        if same:
+            if same[0].get("state") == "superseded":
+                same[0]["state"] = "new"
+            return None
+        for other in table:
+            if (
+                other.get("thread_id") == row["thread_id"]
+                and other.get("state") == "new"
+            ):
+                other["state"] = "superseded"
+        inserted = {"id": len(table) + 1, "state": "new", **row}
+        table.append(inserted)
+        return inserted
 
 
 class FakeClient:
@@ -523,3 +584,104 @@ def test_a_dry_run_writes_nothing():
 
 def test_kit_rows_follow_the_keyset_key():
     assert [k["profile_keyset_id"] for k in kit_rows(payload("a"))] == ["gmk/a"]
+
+
+# reextract
+
+STORED_POST = (
+    '<div class="post"><div class="inner">'
+    '<img src="https://i.example/hero.png"></div></div>'
+)
+
+
+def stored_thread(thread_id, title="[GB] GMK CYL Selene", **values):
+    return {
+        "id": thread_id,
+        "external_id": str(100 + thread_id),
+        "board": "gb",
+        "title": title,
+        "author": "someone",
+        "posted_at": "2026-11-14T23:03:52+00:00",
+        "content_hash": f"hash{thread_id}",
+        **values,
+    }
+
+
+@pytest.fixture
+def reextract_env(monkeypatch):
+    """`magpie reextract` against an in-memory candidates table; `bodies`
+    are the stored first posts by thread id."""
+
+    def setup(threads, bodies, running=None):
+        client = FakeClient([])
+        monkeypatch.setattr(magpie, "create_supabase", lambda: client)
+        monkeypatch.setattr(apply, "fetch_profiles", lambda c: PROFILES)
+        monkeypatch.setattr(apply, "fetch_keysets", lambda c: [_keyset()])
+        monkeypatch.setattr(apply, "running_run", lambda c, now: running)
+        monkeypatch.setattr(apply, "fetch_stored_threads", lambda c: threads)
+        monkeypatch.setattr(
+            apply, "stored_bodies", lambda c, ids: {i: bodies[i] for i in ids}
+        )
+        return client
+
+    return setup
+
+
+def test_reextract_adds_a_candidate_with_the_current_extractor(reextract_env):
+    client = reextract_env(
+        [stored_thread(1), stored_thread(2, "[GB] Rules of the board")],
+        {1: STORED_POST, 2: STORED_POST},
+    )
+    assert magpie.main(["reextract"]) == 0
+    (candidate,) = client.rows["candidates"]
+    assert candidate["thread_id"] == 1
+    assert candidate["extractor_version"] == EXTRACTOR_VERSION
+    assert candidate["content_hash"] == "hash1"
+    assert candidate["payload"]["keyset"]["name"] == "Selene"
+
+
+def test_reextract_run_again_adds_nothing(reextract_env):
+    client = reextract_env([stored_thread(1)], {1: STORED_POST})
+    assert magpie.main(["reextract"]) == 0
+    assert magpie.main(["reextract"]) == 0
+    assert len(client.rows["candidates"]) == 1
+
+
+def test_reextract_counts_posts_it_cannot_parse():
+    counters = magpie.ReextractCounters()
+    magpie.reextract_thread(
+        FakeClient([]),
+        stored_thread(1),
+        "<p>no post here</p>",
+        PROFILES,
+        KeysetIndex([]),
+        counters,
+        dry_run=False,
+    )
+    assert counters.parse_errors == [("101", "no post in the stored body")]
+    summary = magpie.reextract_summary(False, counters)
+    assert "Posts that could not be parsed: 1" in summary
+
+
+def test_reextract_waits_for_a_running_crawl(reextract_env):
+    client = reextract_env([stored_thread(1)], {1: STORED_POST}, running=7)
+    assert magpie.main(["reextract"]) == 1
+    assert client.rows["candidates"] == []
+
+
+def test_a_reextract_dry_run_writes_nothing_and_tells_what_it_would_add(
+    reextract_env,
+):
+    client = reextract_env([stored_thread(1)], {1: STORED_POST})
+    counters = magpie.ReextractCounters()
+    magpie.reextract_thread(
+        client,
+        stored_thread(1),
+        STORED_POST,
+        PROFILES,
+        KeysetIndex([]),
+        counters,
+        dry_run=True,
+    )
+    assert client.rows["candidates"] == []
+    assert counters.added == 1

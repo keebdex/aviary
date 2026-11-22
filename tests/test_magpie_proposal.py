@@ -62,6 +62,10 @@ def topic(title="[GB] GMK CYL Selene | Production Underway", board="gb", **field
         ("[GB] Sagittarius", "unknown", None),
         ("[IC] GMK CYL Mayan blue", "keyset", "GMK"),
         ("[IC] Radius 68: A Mac-Friendly Keyboard with Nacre", "keyboard", None),
+        ("[Pre-order] GMK CYL Neon Vice | Nov 18 - Dec 15", "keyset", "GMK"),
+        ("[Preorder] SA Bliss", "keyset", "SA"),
+        ("[pre order] MW Jirai", "keyset", "MW"),
+        ("[Sold] GMK Olivia", "other", None),
     ],
 )
 def test_suggest(title, kind, code):
@@ -102,6 +106,19 @@ def test_fixture_board_mix():
             "Cream Cheese R3",
         ),
         ("[GB] DCS Cream – GB live", ["DCS"], "Cream"),  # noqa: RUF001
+        # titles from crawl run #1
+        ("[GB] Medusa : A Gaze Forged in Grief (NEW KITS)", [], "Medusa"),
+        ("[GB] KBS Flat Out  A Motorsport Inspired Keycap Set", [], "KBS Flat Out"),
+        (
+            "[GB] SA 64 / SA 64C / SA 16  SA keycaps for vintage boards",
+            ["SA"],
+            "64 / SA 64C / SA 16",
+        ),
+        ("[GB] GMK 3077 (Previously Brown on Beige)", ["GMK"], "3077"),
+        ("[GB] GMK Olivia (Formerly Rose)", ["GMK"], "Olivia"),
+        ("[GB] DCS Cream Cheese R3 (R2 Update)", ["DCS"], "Cream Cheese R3"),
+        # a colon without spaces is part of the name
+        ("[GB] GMK Re:Zero", ["GMK"], "Re:Zero"),
         ("[GB] GMK", ["GMK"], "GMK"),
         ("[GB] GMK !!!", ["GMK"], "GMK"),
         ("[GB] GMK CYL", ["GMK", "CYL"], "CYL"),
@@ -153,9 +170,7 @@ def test_candidate_from_a_group_buy():
             "ic_date": None,
         },
         # without kit labels, one Base kit with the cover keeps it in the queue
-        "kits": [
-            {"kit_id": "base", "name": "Base", "img": "https://i.example/hero.png"}
-        ],
+        "kits": [{"kit_id": "base", "name": None, "img": "https://i.example/hero.png"}],
     }
     # the cover is only the first image: staff should look at it
     assert extraction.confidence["img"] < extraction.confidence["profile_id"]
@@ -170,7 +185,7 @@ def test_promotion_rows_are_pending_without_submitter():
     assert kit_rows(payload) == [
         {
             "kit_id": "base",
-            "name": "Base",
+            "name": None,
             "img": "https://i.example/hero.png",
             "profile_keyset_id": "gmk/selene",
             "review_status": "Pending",
@@ -212,14 +227,24 @@ def test_labelled_images_become_kits_and_the_base_one_the_cover():
     extraction = extract(topic(kit_images=images), PROFILES)
     assert extraction.payload["keyset"]["img"] == "https://i.example/base.png"
     assert extraction.payload["kits"] == [
-        {"kit_id": "base", "name": "Base", "img": "https://i.example/base.png"},
-        {
-            "kit_id": "novelties",
-            "name": "Novelties",
-            "img": "https://i.example/nov.png",
-        },
+        {"kit_id": "base", "name": None, "img": "https://i.example/base.png"},
+        {"kit_id": "novelties", "name": None, "img": "https://i.example/nov.png"},
     ]
     assert extraction.confidence["img"] == 0.7
+
+
+def test_kits_leave_the_name_to_their_category():
+    # keyset_kits.name holds a kit's own name ("TKL Base"); never the
+    # category's, which Keebdex shows when it is null
+    images = [
+        KitImage("https://i.example/base.png", "base", "Base Kit"),
+        KitImage("https://i.example/space.png", "spacebars", "Spacebars"),
+    ]
+    kits = extract(topic(kit_images=images), PROFILES).payload["kits"]
+    assert [(k["kit_id"], k["name"]) for k in kits] == [
+        ("base", None),
+        ("spacebars", None),
+    ]
 
 
 def test_keyboards_and_other_topics_are_not_extracted():
@@ -254,3 +279,15 @@ def test_an_unknown_profile_still_names_the_keyset():
         None,
     )
     assert missing_for_promotion(extraction.payload) == ["profile_id"]
+
+
+def test_a_pre_order_on_the_gb_board_is_a_confirmed_keyset():
+    title = "[Pre-order] GMK CYL Neon Vice | Nov 18 - Dec 15"
+    keyset = extract(topic(title, board="gb"), PROFILES).payload["keyset"]
+    assert (keyset["name"], keyset["status"]) == ("Neon Vice", "Confirmed")
+
+
+def test_names_are_left_for_staff_to_read():
+    confidence = extract(topic(), PROFILES).confidence
+    assert confidence["name"] == confidence["slug"] == 0.6
+    assert confidence["name"] < confidence["status"]

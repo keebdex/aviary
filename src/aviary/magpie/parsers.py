@@ -178,9 +178,13 @@ def parse_post(body: str) -> PostContent:
 
 
 def _is_image_link(href: str) -> bool:
-    return "action=dlattach" in href or urlsplit(href).path.lower().endswith(
-        _IMAGE_EXTENSIONS
-    )
+    """A link to a full-size image; False for one that isn't a URL at all
+    (`http://[broken`): one bad link must not fail the whole post."""
+    try:
+        path = urlsplit(href).path
+    except ValueError:
+        return False
+    return "action=dlattach" in href or path.lower().endswith(_IMAGE_EXTENSIONS)
 
 
 def _images(post: Tag) -> tuple[list[KitImage], set[str], int]:
@@ -208,10 +212,12 @@ def _images(post: Tag) -> tuple[list[KitImage], set[str], int]:
         # thumbnail.
         parent = node.parent
         href = _attr(parent, "href")
-        if parent is not None and parent.name == "a" and _is_image_link(href):
-            used_links.add(canonical_url(href))
+        link = canonical_url(href) if _is_image_link(href) else None
+        if parent is not None and parent.name == "a" and link is not None:
+            used_links.add(link)
             src = href
-        url = normalize_image_url(canonical_url(src))
+        absolute = canonical_url(src)
+        url = normalize_image_url(absolute) if absolute is not None else None
         if url is None:
             dropped += 1
         elif url not in seen:
@@ -227,7 +233,7 @@ def _vendor_links(post: Tag, image_links: set[str]) -> list[str]:
         if not href.startswith(("http://", "https://")):
             continue
         url = canonical_url(href)
-        if is_internal(url) or url in image_links or url in links:
+        if url is None or is_internal(url) or url in image_links or url in links:
             continue
         links.append(url)
     return links

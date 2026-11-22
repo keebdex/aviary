@@ -7,6 +7,7 @@ import pytest
 from aviary.magpie.geekhack import (
     canonical_url,
     extract_topic_id,
+    is_internal,
     normalize_image_url,
     topic_id_of,
 )
@@ -115,6 +116,32 @@ def test_topic_drops_non_url_images_and_cleans_bbcode_tails():
         "https://imagedelivery.net/abc/def/public",
     ]
     assert detail.dropped_image_urls == 1
+
+
+def test_a_broken_link_does_not_fail_the_post():
+    # "Invalid IPv6 URL": urlsplit raises on an unclosed "["
+    html = """
+    <html><head><title>[GB] NP-R</title></head><body>
+    <div class="post"><div class="inner">
+      <a href="http://[broken">a link the author mistyped</a>
+      <a href="http://[broken/full.png"><img src="https://i.example/thumb.png"></a>
+      <img src="http://[broken/x.png">
+      <img src="https://i.example/a.png">
+      <a href="https://vendor.example/np-r">Vendor</a>
+    </div></div></body></html>
+    """
+    detail = parse_topic(html)
+    assert detail.image_urls == [
+        "https://i.example/thumb.png",
+        "https://i.example/a.png",
+    ]
+    assert detail.vendor_links == ["https://vendor.example/np-r"]
+    assert detail.dropped_image_urls == 1
+
+
+def test_unparseable_urls_are_not_urls():
+    assert canonical_url("http://[broken") is None
+    assert not is_internal("http://[broken")
 
 
 def test_images_follow_the_kit_label_before_them():
@@ -262,3 +289,20 @@ def test_bbcode_tails_and_whitespace_are_cut(raw, expected):
 )
 def test_things_that_are_not_urls_are_dropped(raw):
     assert normalize_image_url(raw) is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("https://imgur.com/PFaO1KL.jpg", "https://i.imgur.com/PFaO1KL.jpg"),
+        ("http://www.imgur.com/PFaO1KL.png", "https://i.imgur.com/PFaO1KL.png"),
+        ("https://imgur.com/PFaO1KL.jpg?1", "https://i.imgur.com/PFaO1KL.jpg?1"),
+        # albums and pages without a file stay as they are
+        ("https://imgur.com/a/xyz", "https://imgur.com/a/xyz"),
+        ("https://imgur.com/gallery/xyz.jpg", "https://imgur.com/gallery/xyz.jpg"),
+        ("https://imgur.com/PFaO1KL", "https://imgur.com/PFaO1KL"),
+        ("https://i.imgur.com/PFaO1KL.jpg", "https://i.imgur.com/PFaO1KL.jpg"),
+    ],
+)
+def test_imgur_page_links_to_a_file_point_at_the_file(raw, expected):
+    assert normalize_image_url(raw) == expected

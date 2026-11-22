@@ -38,11 +38,18 @@ def watermark(day):
 # listing
 
 
-def test_first_listing_has_no_watermark_and_reads_on():
+def test_a_first_listing_stopped_by_the_cap_still_sets_a_watermark():
     listing = BoardListing("gb", None)
     listing.add_page(page(summary(1, at(12)), summary(2, at(11))))
+    # stopped by the page cap: incomplete, but the next run stops at its
+    # newest thread instead of listing the whole cap again
     assert not listing.done
-    # stopped by the page cap: no watermark yet
+    assert listing.next_watermark() == watermark(12)
+
+
+def test_a_listing_without_dated_threads_keeps_no_watermark():
+    listing = BoardListing("gb", None)
+    listing.add_page(page(summary(1, "")))
     assert listing.next_watermark() is None
 
 

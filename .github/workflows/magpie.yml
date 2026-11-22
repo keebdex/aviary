@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       steps:
-        description: What to run
+        description: What to run (all = crawl, then promote)
         type: choice
-        options: [all, crawl, promote]
-        default: all
+        options: [crawl, promote, all, reextract]
+        default: crawl
       dry-run:
         description: Log every write without making it
         type: boolean
@@ -46,9 +46,18 @@ jobs:
       # candidates. A listing that fails writes nothing and fails the job;
       # failed thread fetches are routine and only listed.
       - name: Crawl Geekhack
-        if: inputs.steps != 'promote'
+        if: github.event_name == 'schedule' || inputs.steps == 'crawl' || inputs.steps == 'all'
         run: uv run magpie crawl $DRY_RUN
 
+      # Extract every stored first post again (after EXTRACTOR_VERSION is
+      # bumped), without requests to Geekhack. Manual only.
+      - name: Extract stored threads again
+        if: github.event_name == 'workflow_dispatch' && inputs.steps == 'reextract'
+        run: uv run magpie reextract $DRY_RUN
+
+      # Manual only, never on schedule: an IC and its GB are two candidates
+      # (duplicate keysets), and covers and kits are not reliable enough for
+      # the review queue until Keebdex has a Discovered tab.
       - name: Propose complete keysets to Keebdex
-        if: inputs.steps != 'crawl'
+        if: github.event_name == 'workflow_dispatch' && (inputs.steps == 'promote' || inputs.steps == 'all')
         run: uv run magpie promote $DRY_RUN

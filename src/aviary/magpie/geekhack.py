@@ -4,7 +4,7 @@ import ipaddress
 import re
 from datetime import UTC, datetime
 from typing import Literal
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 FORUM = "geekhack"
 BASE_URL = "https://geekhack.org"
@@ -17,6 +17,11 @@ BOARDS: dict[str, int] = {"ic": 132, "gb": 70}
 _SESSION_RE = re.compile(r"PHPSESSID=[^&;#]*[&;]?")
 _TOPIC_ID_RE = re.compile(r"topic=(\d+)")
 _BBCODE_CLOSING_TAG_RE = re.compile(r"\[/[A-Za-z]+\]")
+# An image file on imgur's page host ("imgur.com/PFaO1KL.jpg"): that host
+# redirects to the file, which Cloudflare's upload-by-URL and <img> may not
+# follow; i.imgur.com serves it directly.
+_IMGUR_PAGE_HOSTS = ("imgur.com", "www.imgur.com")
+_IMGUR_FILE_RE = re.compile(r"/[A-Za-z0-9]+\.(?:jpe?g|png|gif|webp)", re.IGNORECASE)
 _HOST_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?")
 _PREFIX_RE = re.compile(r"^\s*\[([^\]]+)\]")
 
@@ -64,16 +69,22 @@ def topic_id_of(url: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def canonical_url(url: str) -> str:
+def canonical_url(url: str) -> str | None:
     """Make `url` absolute and drop the per-visit PHPSESSID so links stay
-    stable."""
-    absolute = urljoin(BASE_URL + "/", url)
+    stable; None when it can't be parsed as a URL (`http://[broken`)."""
+    try:
+        absolute = urljoin(BASE_URL + "/", url)
+    except ValueError:
+        return None
     cleaned = _SESSION_RE.sub("", absolute)
     return cleaned.rstrip("?&;")
 
 
 def is_internal(url: str) -> bool:
-    host = urlsplit(url).hostname or ""
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return False
     return host == "geekhack.org" or host.endswith(".geekhack.org")
 
 
@@ -94,6 +105,8 @@ def normalize_image_url(raw: str) -> str | None:
     Only the format is checked, nothing is fetched. A URL is kept untouched
     when it has an http(s) scheme, a real host, and no whitespace; a file
     extension is not required (CDN and forum attachment URLs often have none).
+    The one rewrite: an image file on `imgur.com` moves to `i.imgur.com`
+    (albums stay, `is_album` drops them).
     Stray BBCode left in the post (`.png[/center]`) is cut off first so the
     image behind it is not lost.
     """
@@ -106,6 +119,8 @@ def normalize_image_url(raw: str) -> str | None:
         return None
     if parts.scheme not in ("http", "https") or not _is_valid_host(parts.hostname):
         return None
+    if parts.hostname in _IMGUR_PAGE_HOSTS and _IMGUR_FILE_RE.fullmatch(parts.path):
+        return urlunsplit(("https", "i.imgur.com", parts.path, parts.query, ""))
     return url
 
 

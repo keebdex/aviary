@@ -17,21 +17,28 @@ from aviary.common.db import Row
 from aviary.common.slug import url_slugify
 from aviary.magpie.classify import suggest
 from aviary.magpie.geekhack import strip_prefix, topic_url
-from aviary.magpie.kits import DETECTED_KITS, KIT_NAMES
+from aviary.magpie.kits import DETECTED_KITS
 from aviary.magpie.parsers import KitImage
 
 # Bump when what extract() reads changes: the next crawl extracts every
 # fetched thread again (ingest.candidates keeps one row per version and
 # content).
-EXTRACTOR_VERSION = "magpie-1"
+EXTRACTOR_VERSION = "magpie-2"
 MODULE = "Keyset"
 PENDING = "Pending"
 
-# Everything after " | " or " - " is GB progress ("| Shipping!", "- GB live").
-_TAIL_RE = re.compile(r"\s*\|.*$|\s+[-–—]\s.*$")  # noqa: RUF001
+# Everything after " | ", " - " or " : " is GB progress or a tagline ("|
+# Shipping!", "- GB live", "Medusa : A Gaze Forged in Grief"), and so is
+# everything after two spaces, which is where the listing drops a dash ("KBS
+# Flat Out  A Motorsport Inspired Keycap Set"). A colon needs spaces on both
+# sides, so "Re:Zero" stays whole.
+_TAIL_RE = re.compile(r"\s*\|.*$|\s+[-–—:]\s.*$|\s{2,}.*$")  # noqa: RUF001
+# Notes in parentheses: progress ("(Cancelled)", "(R2 Update)"), new kits,
+# and former names ("(Previously Brown on Beige)").
 _STATUS_PARENS_RE = re.compile(
     r"\s*\((?=[^)]*\b(?:cancel\w*|update\w*|extras?|live|shipp\w*|production"
-    r"|complete\w*|ended|moq|sold out|in stock)\b)[^)]*\)",
+    r"|complete\w*|ended|moq|sold out|in stock|new kits?|previously|formerly)\b)"
+    r"[^)]*\)",
     re.IGNORECASE,
 )
 _ALBUM_MARKERS = ("/a/", "/gallery/")
@@ -41,11 +48,12 @@ CHERRY_SCULPT = "1-1-2-3-4-4"
 
 # How sure extract() is of each field (0..1), for staff to see what to check:
 # a title follows conventions, the thread starter is often a vendor rather
-# than the designer, and the first image is often a render of a board.
+# than the designer, and the first image is often a render of a board. Names
+# still carry taglines and notes often enough that staff should read them.
 CONFIDENCE = {
     "profile_id": 1.0,
-    "name": 0.8,
-    "slug": 0.8,
+    "name": 0.6,
+    "slug": 0.6,
     "url": 1.0,
     "status": 0.8,
     "ic_date": 0.9,
@@ -80,6 +88,8 @@ class Extraction:
     payload: Row
     confidence: dict[str, float]
     missing: list[str]
+    # the keycap code the title starts with ("GMK"), found in Keebdex or not
+    profile_code: str | None = None
 
     @property
     def key(self) -> str | None:
@@ -210,16 +220,18 @@ def extract(topic: Topic, profiles: Sequence[Row]) -> Extraction | None:
             confidence[field] = CONFIDENCE[field]
 
     # No kit label in the post: one Base kit with the cover, so the keyset
-    # shows up in the review queue.
+    # shows up in the review queue. `name` is only for a kit's own name ("TKL
+    # Base"); Keebdex shows the category's name when it is null.
     chosen = kit_images or ({"base": cover} if cover else {})
     kits = [
-        {"kit_id": kit, "name": KIT_NAMES[kit], "img": chosen[kit]}
+        {"kit_id": kit, "name": None, "img": chosen[kit]}
         for kit in DETECTED_KITS
         if kit in chosen
     ]
     return Extraction(
         name=name or None,
         profile_id=profile_id,
+        profile_code=codes[0] if codes else None,
         payload={"keyset": keyset, "kits": kits},
         confidence=confidence,
         missing=missing,

@@ -51,7 +51,8 @@ _KEYCAP_RE = re.compile(
 )
 _FIRST_WORD_RE = re.compile(r"[A-Za-z0-9]+")
 # Topics that announce a set; anything else is rules, chatter, and the like.
-SET_PREFIXES = frozenset({"GB", "IC"})
+# A pre-order sells like a group buy; its status follows the board.
+SET_PREFIXES = frozenset({"GB", "IC", "PRE-ORDER", "PREORDER", "PRE ORDER"})
 
 
 @dataclass(frozen=True)
@@ -63,7 +64,7 @@ class Suggestion:
 
 def suggest(title: str) -> Suggestion:
     if extract_prefix(title).upper() not in SET_PREFIXES:
-        return Suggestion("other", "no [GB] or [IC] prefix")
+        return Suggestion("other", "no [GB], [IC] or [Pre-order] prefix")
     name = strip_prefix(title)
     first = _FIRST_WORD_RE.match(name)
     if first and first.group().upper() in KEYCAP_CODES:

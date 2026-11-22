@@ -33,7 +33,10 @@ class BoardListing:
     A listing stops at the first page that reaches `watermark` (the newest
     last post the previous succeeded run saw), at the board's last page, or
     at the run's page cap. Stopped by the cap, it is incomplete: threads below
-    may have been missed, so the board keeps its old watermark.
+    may have been missed, so the board keeps its old watermark. A board that
+    never had one gets the newest last post anyway: what lies below the cap
+    is backlog, read by one run with a higher `--max-pages` on purpose, and
+    without a watermark every run would list the whole cap.
     """
 
     board: str
@@ -67,10 +70,12 @@ class BoardListing:
         return self.reached_end or self.reached_watermark
 
     def next_watermark(self) -> datetime | None:
-        if not self.done or self.newest is None:
+        if self.newest is None:
             return self.watermark
         if self.watermark is None:
             return self.newest
+        if not self.done:
+            return self.watermark
         return max(self.newest, self.watermark)
 
 

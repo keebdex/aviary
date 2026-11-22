@@ -190,10 +190,8 @@ def save_candidate(client: Client, candidate: Row, dry_run: bool) -> str | None:
     candidate back to waiting (the first post went back to an earlier
     version), None when it was already waiting, dismissed, or promoted. The
     trigger returns no row in both of the last cases, so the existing
-    extraction's state is read first."""
-    if dry_run:
-        log.info("[DRY RUN] Would add candidate: %s", _dump(candidate))
-        return ADDED
+    extraction's state is read first; a dry run reads it too, to tell what
+    the insert would do."""
     existing = (
         ingest(client)
         .table(CANDIDATES)
@@ -205,11 +203,58 @@ def save_candidate(client: Client, candidate: Row, dry_run: bool) -> str | None:
         .execute()
         .data
     )
+    state = existing[0]["state"] if existing else None
+    if dry_run:
+        if state is None:
+            log.info("[DRY RUN] Would add candidate: %s", _dump(candidate))
+            return ADDED
+        return RESTORED if state == "superseded" else None
     if ingest(client).table(CANDIDATES).insert(candidate).execute().data:
         return ADDED
-    if existing and existing[0]["state"] == "superseded":
-        return RESTORED
-    return None
+    return RESTORED if state == "superseded" else None
+
+
+# Extracting stored posts again
+
+# Stored first posts read per request: each can be up to 500,000 characters.
+BODY_BATCH_SIZE = 50
+
+
+def running_run(client: Client, now: datetime) -> int | None:
+    """The crawl run in progress (started within STALE_RUN), if any."""
+    rows = (
+        _source(ingest(client).table(RUNS).select("id"))
+        .eq("status", "running")
+        .gte("started_at", (now - STALE_RUN).isoformat())
+        .limit(1)
+        .execute()
+        .data
+    )
+    return rows[0]["id"] if rows else None
+
+
+def fetch_stored_threads(client: Client) -> list[Row]:
+    """Threads with a stored first post, neither ignored nor gone, without
+    the post itself (`stored_bodies` reads it in batches)."""
+    return fetch_all(
+        ingest(client),
+        THREADS,
+        "id,external_id,board,title,author,posted_at,content_hash",
+        lambda query: (
+            _source(query)
+            .not_.is_("raw_body", "null")
+            .is_("ignored_at", "null")
+            .is_("gone_at", "null")
+        ),
+    )
+
+
+def stored_bodies(client: Client, ids: list[int]) -> dict[int, str]:
+    """The `raw_body` of each thread in `ids`, by id."""
+    rows = (
+        ingest(client).table(THREADS).select("id,raw_body").in_("id", ids).execute()
+    ).data
+    return {row["id"]: row["raw_body"] for row in rows}
 
 
 # Keebdex

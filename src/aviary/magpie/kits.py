@@ -4,7 +4,6 @@ import re
 
 # Slugs of `kit_categories` detected from post text.
 DETECTED_KITS = ("base", "novelties", "spacebars")
-KIT_NAMES = {"base": "Base", "novelties": "Novelties", "spacebars": "Spacebars"}
 
 # The whole line has to be the label ("Base Kit", "Novelties:", "Space bars -
 # $30"): a sentence that merely mentions a kit ("Convex DSA Space Bars") must
