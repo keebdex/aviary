@@ -47,7 +47,7 @@ separate repository).
 - `src/aviary/lorikeet/`: reference color palettes. `ral.py` crawls
   ralcolorchart.com, `sync.py` plans and writes the `colors` rows, `__main__.py`
   is the `lorikeet` command.
-- `src/aviary/bowerbird/`: the artisan sync, ported from `../catalog-sync`.
+- `src/aviary/bowerbird/`: the artisan sync, ported from catalog-sync (archived).
   `gdoc/` holds the Google Docs side (`parser.py`, `dates.py`, `jsregex.py`,
   `google.py` for the read-only API calls, `importer.py`); `jsregex.py` also
   holds JavaScript's whitespace (`JS_WHITESPACE`, `js_trim`), and per-maker name

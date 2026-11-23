@@ -11,8 +11,8 @@ bird:
 | `magpie`    | Crawls forum interest checks and group buys    | Porting |
 
 `bowerbird` and `pelican` took over the artisan sync and the image jobs from
-[catalog-sync](https://github.com/keebdex/catalog-sync), which keeps only its
-vendor keyset scraper, run by hand, until `magpie` replaces it.
+[catalog-sync](https://github.com/keebdex/catalog-sync), now archived; `magpie`
+replaces its vendor keyset scraper.
 
 ## Setup
 
@@ -71,7 +71,7 @@ Design code up on ralcolorchart.com as it is typed.
 ## bowerbird
 
 Syncs artisan sculpts and colorways into Keebdex from makers' Google Docs and
-maker websites. It is a port of catalog-sync's artisan sync, and replaces it in
+maker websites. It is a port of catalog-sync's artisan sync, which it replaced in
 production.
 
 ```bash
@@ -106,7 +106,7 @@ uv run --env-file .env bowerbird scrape --dry-run
 ## pelican
 
 Keeps Keebdex's images on Cloudflare Images and backed up in Cloudflare R2: a
-port of catalog-sync's image jobs, which it replaces in production.
+port of catalog-sync's image jobs, which it replaced in production.
 
 ```bash
 uv run --env-file .env pelican sync --dry-run
