@@ -65,9 +65,11 @@ separate repository).
   (the polite `Fetcher`), `parsers.py` (board list and first post), `kits.py`,
   `classify.py` (title to kind and profile code), `proposal.py` (thread to
   keyset candidate, `EXTRACTOR_VERSION`), `plan.py` (listings, fetch schedule,
-  promotions, pure), `apply.py` (the `ingest` tables and the Keebdex writes),
-  `__main__.py` the `magpie` command.
-  See "Forum crawl".
+  promotions, pure), `ingest.py` (reads and writes of the `ingest` tables),
+  `keebdex.py` (keyset and profile reads, the promotion writes), one module
+  per command (`crawl.py`, `promote.py`, `reextract.py`) with `summary.py`
+  for what their job summaries share, and `__main__.py` the `magpie` command
+  line (arguments, `topic`). See "Forum crawl".
 
 ## Commands
 
