@@ -90,9 +90,12 @@ separate repository).
 - Keep requests to other websites polite: one at a time, with a delay between
   pages.
 - Manual runs (`workflow_dispatch`) default to a dry run. Scheduled runs write
-  (lorikeet's schedule is paused). bowerbird and pelican run at catalog-sync's
-  old times: bowerbird at 23:00 UTC, pelican sync and restore at 01:00, backup
-  and the database dump at 02:00, prune at 00:00 on the 1st and the 15th.
+  (lorikeet's schedule is paused). bowerbird runs at 20:30 and 08:30 UTC
+  (03:30 and 15:30 UTC+7), pelican sync and restore at 01:30, backup and the
+  database dump at 03:30, prune at 04:30 on the 1st and the 15th. GitHub starts
+  schedules hours late, latest on the hour, so keep new schedules off the hour;
+  pelican's `case` and its `database` job match the cron strings exactly, so
+  change them together.
 
 ## Revision sources
 

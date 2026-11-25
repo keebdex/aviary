@@ -12,10 +12,13 @@ on:
         description: Log every write and upload without making it
         type: boolean
         default: true
-  # Scheduled runs write, daily at 23:00 UTC (catalog-sync's artisan-sync
-  # time), two hours before pelican sync uploads the images they add.
+  # Scheduled runs write, twice a day at 20:30 and 08:30 UTC (03:30 and 15:30
+  # in Vietnam, UTC+7). GitHub starts
+  # schedules hours late, most of all on the hour, when load peaks: two runs
+  # 12 hours apart, off the hour, keep the catalog fresher. Images are
+  # uploaded by the run itself, so pelican's timing doesn't matter here.
   schedule:
-    - cron: '0 23 * * *'
+    - cron: '30 8,20 * * *'
 
 concurrency:
   group: bowerbird

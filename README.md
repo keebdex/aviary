@@ -97,8 +97,8 @@ uv run --env-file .env bowerbird scrape --dry-run
   here deletes an image: `pelican prune` removes the unused ones.
 - `.github/workflows/bowerbird.yml` runs either or both from the Actions tab, as
   a dry run unless the box is unticked, and lists in the run's summary what
-  each maker's sync changed (or would change). It also runs both daily at
-  23:00 UTC, writing.
+  each maker's sync changed (or would change). It also runs both twice a day,
+  at 20:30 and 08:30 UTC (03:30 and 15:30 UTC+7), writing.
 - Slugs come from python-slugify; `docs/slugs.md` explains the map that keeps
   the slugs catalog-sync gave unusual names, and the check to run before
   bowerbird takes over.
@@ -121,9 +121,9 @@ uv run --env-file .env pelican sync --dry-run
   missing or orphaned at once) instead of acting on them.
 - `.github/workflows/pelican.yml` runs one job from the Actions tab, as a dry
   run unless the box is unticked, plus a `database` job that dumps the database
-  to R2. On schedule it writes: sync and restore daily at 01:00 UTC (two hours
-  after bowerbird), backup and the `database` dump at 02:00, and prune at 00:00
-  on the 1st and the 15th.
+  to R2. On schedule it writes: sync and restore daily at 01:30 UTC, backup and
+  the `database` dump daily at 03:30, and prune at 04:30 on the 1st and the
+  15th.
 - `docs/backups.md` is the operator guide for the R2 bucket: its locks, the
   trash, and restoring by hand.
 

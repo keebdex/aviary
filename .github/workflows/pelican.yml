@@ -15,14 +15,16 @@ on:
         description: Go past the safety ratio (restore --force, backup --force-trash)
         type: boolean
         default: false
-  # Scheduled runs write, at catalog-sync's old times (UTC):
-  # - sync then restore at 01:00, two hours after bowerbird
-  # - backup and the database dump at 02:00, after sync's uploads
-  # - prune at 00:00 on the 1st and the 15th
+  # Scheduled runs write (UTC), off the hour, since GitHub starts schedules
+  # hours late and latest on the hour:
+  # - sync then restore daily at 01:30, for keyset, kit, and variant images
+  #   from the app (bowerbird uploads colorway images itself)
+  # - backup and the database dump daily at 03:30, after the night's sync
+  # - prune at 04:30 on the 1st and the 15th
   schedule:
-    - cron: '0 1 * * *'
-    - cron: '0 2 * * *'
-    - cron: '0 0 1,15 * *'
+    - cron: '30 1 * * *'
+    - cron: '30 3 * * *'
+    - cron: '30 4 1,15 * *'
 
 concurrency:
   group: pelican-${{ inputs.job || github.event.schedule }}
@@ -71,9 +73,9 @@ jobs:
           FORCE_TRASH: ${{ inputs.force && inputs.job == 'backup' && '--force-trash' || '' }}
         run: |
           case "$SCHEDULE" in
-            '0 1 * * *') jobs='sync restore' ;;
-            '0 2 * * *') jobs='backup' ;;
-            '0 0 1,15 * *') jobs='prune' ;;
+            '30 1 * * *') jobs='sync restore' ;;
+            '30 3 * * *') jobs='backup' ;;
+            '30 4 1,15 * *') jobs='prune' ;;
             *) jobs="$JOB" ;;
           esac
           for job in $jobs; do
@@ -84,7 +86,7 @@ jobs:
 
   # By hand, or with the scheduled backup
   database:
-    if: inputs.job == 'database' || github.event.schedule == '0 2 * * *'
+    if: inputs.job == 'database' || github.event.schedule == '30 3 * * *'
     runs-on: ubuntu-latest
     env:
       # Session pooler URL: GitHub runners have no IPv6 for the direct host
