@@ -253,7 +253,14 @@ def upload_image(client: httpx.Client, image_id: str, url: str) -> UploadResult:
         return _upload_downloaded(client, image_id, url)
 
     try:
-        response = _api(client, "POST", "/v1", data={"id": image_id, "url": url})
+        # Cloudflare takes only multipart/form-data (415 otherwise); httpx sends
+        # `data` alone urlencoded, so the fields go as file-less parts
+        response = _api(
+            client,
+            "POST",
+            "/v1",
+            files={"id": (None, image_id), "url": (None, url)},
+        )
     except httpx.HTTPError as error:
         log.error("Unable to upload %s: %s", image_id, error)
         return UploadResult(False, None, str(error))
