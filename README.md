@@ -8,11 +8,11 @@ bird:
 | `lorikeet`  | Adds reference color palettes (RAL) to Keebdex | Ready   |
 | `bowerbird` | Syncs artisan catalogs from makers and Docs    | Ready   |
 | `pelican`   | Keeps Keebdex's images on Cloudflare and in R2 | Ready   |
-| `magpie`    | Crawls forum interest checks and group buys    | Planned |
+| `magpie`    | Crawls forum interest checks and group buys    | Porting |
 
 `bowerbird` and `pelican` took over the artisan sync and the image jobs from
-[catalog-sync](https://github.com/keebdex/catalog-sync), which keeps only its
-vendor keyset scraper, run by hand, until `magpie` replaces it.
+[catalog-sync](https://github.com/keebdex/catalog-sync), now archived; `magpie`
+replaces its vendor keyset scraper.
 
 ## Setup
 
@@ -71,7 +71,7 @@ Design code up on ralcolorchart.com as it is typed.
 ## bowerbird
 
 Syncs artisan sculpts and colorways into Keebdex from makers' Google Docs and
-maker websites. It is a port of catalog-sync's artisan sync, and replaces it in
+maker websites. It is a port of catalog-sync's artisan sync, which it replaced in
 production.
 
 ```bash
@@ -106,7 +106,7 @@ uv run --env-file .env bowerbird scrape --dry-run
 ## pelican
 
 Keeps Keebdex's images on Cloudflare Images and backed up in Cloudflare R2: a
-port of catalog-sync's image jobs, which it replaces in production.
+port of catalog-sync's image jobs, which it replaced in production.
 
 ```bash
 uv run --env-file .env pelican sync --dry-run
@@ -126,6 +126,56 @@ uv run --env-file .env pelican sync --dry-run
   15th.
 - `docs/backups.md` is the operator guide for the R2 bucket: its locks, the
   trash, and restoring by hand.
+
+## magpie
+
+Crawls Geekhack's [Interest Checks](https://geekhack.org/index.php?board=132.0)
+and [Group Buys](https://geekhack.org/index.php?board=70.0) boards into the
+`ingest` schema of Keebdex's database, reads a keyset candidate out of each
+keyset thread, and proposes the complete ones as Pending keysets for staff to
+review in Keebdex's keyset Submissions. A port of huginn (a local crawler with
+a web UI) without the UI: the choices huginn left to a person (profile, cover,
+kits) are made from the topic, and what magpie can't settle waits in
+`ingest.candidates` for staff.
+
+```bash
+uv run --env-file .env magpie crawl --dry-run
+```
+
+```bash
+uv run --env-file .env magpie promote --dry-run
+```
+
+```bash
+uv run magpie topic 127176
+```
+
+- `crawl` is one run (`ingest.crawl_runs`; one at a time). It lists both
+  boards (`--board` for one) down to the newest last post the previous
+  succeeded run saw, up to 5 pages each (`--max-pages`; run once with a large
+  value to backfill). Every page is read, about one a second, before anything
+  is written: a page that fails or shows no topics fails the run and writes
+  nothing. Then it fetches the first post of due threads (new, with new
+  replies, or a week since the last fetch while under 90 days old; 100 at most,
+  `--fetch-limit`), keeps the post as it is, and adds a keyset candidate:
+  profile, name, cover, kits, status, and a confidence per field. A topic that
+  fails is retried with backoff; one that answers 404 is marked gone.
+- `promote` inserts, newest first and at most 25 per run (`--limit`), the
+  candidates magpie read completely (profile, name, cover, kits), posted in the
+  last 90 days (`--max-age-days`), that Keebdex doesn't have: a Pending keyset
+  with no submitter and its Pending kits (one per labelled kit image, or a Base
+  kit with the cover, so the keyset shows up in the review queue). A candidate
+  of a keyset Keebdex has (its URL, or the same profile and slug) gets that
+  keyset as its `match_key` and waits for staff, as do incomplete and older
+  ones; a different status is reported, never written.
+- `topic` prints one topic as JSON and needs no database.
+- Needs the `ingest` schema (migration `20261119000000_ingest_schema.sql` in
+  Keebdex's supabase repository), with `ingest` added to the Data API's exposed
+  schemas. Promoted keysets show in Keebdex's history under the
+  `magpie.geekhack` revision source.
+- `.github/workflows/magpie.yml` runs the crawl, the promotion, or both from
+  the Actions tab, as a dry run unless the box is unticked. Its schedule is off
+  until the schema is applied and a dry run has been checked.
 
 ## License
 

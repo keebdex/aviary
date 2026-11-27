@@ -1,0 +1,63 @@
+name: magpie
+
+on:
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: What to run (all = crawl, then promote)
+        type: choice
+        options: [crawl, promote, all, reextract]
+        default: crawl
+      dry-run:
+        description: Log every write without making it
+        type: boolean
+        default: true
+  # Off until supabase migration 20261119000000_ingest_schema is applied, a
+  # dry run has been checked, and the time and limits are decided. Scheduled
+  # runs write.
+  # To turn it on:
+  # schedule:
+  #   - cron: '0 4 * * *'
+
+concurrency:
+  group: magpie
+  cancel-in-progress: false
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+  DRY_RUN: ${{ github.event_name != 'schedule' && inputs.dry-run && '--dry-run' || '' }}
+
+jobs:
+  magpie:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+
+      # One crawl run: list both boards, fetch due threads, extract
+      # candidates. A listing that fails writes nothing and fails the job;
+      # failed thread fetches are routine and only listed.
+      - name: Crawl Geekhack
+        if: github.event_name == 'schedule' || inputs.steps == 'crawl' || inputs.steps == 'all'
+        run: uv run magpie crawl $DRY_RUN
+
+      # Extract every stored first post again (after EXTRACTOR_VERSION is
+      # bumped), without requests to Geekhack. Manual only.
+      - name: Extract stored threads again
+        if: github.event_name == 'workflow_dispatch' && inputs.steps == 'reextract'
+        run: uv run magpie reextract $DRY_RUN
+
+      # Manual only, never on schedule: an IC and its GB are two candidates
+      # (duplicate keysets), and covers and kits are not reliable enough for
+      # the review queue until Keebdex has a Discovered tab.
+      - name: Propose complete keysets to Keebdex
+        if: github.event_name == 'workflow_dispatch' && (inputs.steps == 'promote' || inputs.steps == 'all')
+        run: uv run magpie promote $DRY_RUN
